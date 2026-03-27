@@ -1,0 +1,14 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "yuna_controller",
+  "device_class": "controller",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/system":   { "type": "button",   "click_activate_threshold": 0.5 },
+    "/input/trigger":  { "type": "trigger",  "click_activate_threshold": 0.7 },
+    "/input/grip":     { "type": "button",   "click_activate_threshold": 0.5 },
+    "/input/a":        { "type": "button",   "click_activate_threshold": 0.5 },
+    "/input/b":        { "type": "button",   "click_activate_threshold": 0.5 },
+    "/input/joystick": { "type": "joystick", "click_activate_threshold": 0.5 }
+  }
+}

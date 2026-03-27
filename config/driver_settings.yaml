@@ -1,0 +1,23 @@
+# Project YUNA Link
+# config/driver_settings.yaml
+# ドライバ動作設定（src/pose_server.h の定数と対応）
+
+driver:
+  pipe_name: '\\.\pipe\YunaLinkPose'
+  log_level: info          # debug / info / warn / error
+
+hmd:
+  serial: YUNA_HMD_001
+  display_frequency: 90.0  # Hz
+  ipd_meters: 0.063
+  render_width: 1920
+  render_height: 1080
+  default_position: { x: 0.0, y: 1.6, z: 0.0 }
+
+controller_left:
+  serial: YUNA_CTRL_LEFT_001
+  default_position: { x: -0.25, y: 1.1, z: -0.1 }
+
+controller_right:
+  serial: YUNA_CTRL_RIGHT_001
+  default_position: { x: 0.25, y: 1.1, z: -0.1 }

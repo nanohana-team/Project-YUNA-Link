@@ -19,76 +19,149 @@ VRChat内で「人間のプレイヤーのように振る舞うAIアバター」
 
 ---
 
-## 🚀 初期版（MVP）
+## 📁 ディレクトリ構成
 
-### 目的
-
-「1人の相手と簡単な会話ができるAIアバター」を最小構成で成立させる。
-
-### 機能
-
-* SteamVR上で頭・両手を持つアバターとして動作
-* 前方の人物を1人検出
-* 距離の概算（近距離 / 中距離 / 遠距離）
-* 音声認識 → LLM → TTS による会話
-* 簡易状態管理による会話制御
-
-### 構成
-
-#### 身体系
-
-* SteamVR仮想デバイス（頭・両手）
-* 外部から姿勢を制御可能
-
-#### 視覚系
-
-* SteamVR映像取得
-* YOLOによる人物検出
-* 距離の概算
-
-#### 会話系
-
-* 音声認識
-* 小型LLM
-* TTS
-
-#### 制御系
-
-* 状態管理（待機 / 検出 / 応答など）
-* 会話対象選択
-* フォールバック応答
+```
+Project-YUNA-Link/
+├── apps/
+│   └── pose_sender.py          # Python姿勢送信クライアント
+├── config/
+│   └── driver_settings.yaml    # ドライバ設定
+├── docs/
+│   ├── setup.md                # セットアップ手順
+│   ├── protocol.md             # 通信プロトコル仕様
+│   └── architecture.md        # アーキテクチャ概要
+├── logs/                       # ログ出力先（git管理外）
+├── models/                     # モデルファイル置き場（git管理外）
+├── scripts/
+│   └── install_driver.bat      # SteamVRへのインストール
+├── src/
+│   ├── driver_main.cpp/h       # ドライバDLLエントリ・プロバイダ
+│   ├── hmd_device.cpp/h        # 仮想HMD（頭）
+│   ├── controller_device.cpp/h # 仮想コントローラ（左手・右手）
+│   ├── pose_server.cpp/h       # Named Pipeサーバー
+│   ├── driver_yuna.vcxproj     # Visual Studio 2022 プロジェクト
+│   └── driver_yuna/
+│       ├── driver.vrdrivermanifest
+│       └── resources/input/
+│           └── yuna_controller_profile.json
+├── ProjectYUNALink.sln         # Visual Studio 2022 ソリューション
+├── .gitignore
+├── .gitattributes
+└── License.txt
+```
 
 ---
 
-## 🎯 最終目標
+## 🚀 クイックスタート
 
-### 目指す状態
+### 1. 前提ソフトウェア
 
-* VRChat内で自然な存在感を持つAIプレイヤー
-* 複数人環境での基本的な会話対応
-* 視線・ジェスチャ・姿勢の自然な制御
+| ソフトウェア | バージョン |
+|---|---|
+| Windows | 10 / 11 |
+| Visual Studio | 2022（C++デスクトップ開発ワークロード） |
+| OpenVR SDK | 最新 |
+| Python | 3.10 以上 |
+| SteamVR | 最新（Steam経由） |
 
-### 追加機能
+### 2. OpenVR SDK の取得
 
-* 左右眼映像による距離推定
-* 人外アバター対応（YOLO追加学習）
-* 会話履歴と文脈管理
-* 複数人会話制御
-* 視線・身体・発話の同期
+```bat
+git clone https://github.com/ValveSoftware/openvr.git C:\openvr
+```
+
+### 3. 環境変数の設定
+
+```bat
+setx OPENVR_SDK_PATH "C:\openvr"
+```
+
+設定後、**新しいコマンドプロンプトを開き直す**こと。
+
+### 4. ビルド
+
+`ProjectYUNALink.sln` を Visual Studio 2022 で開き、
+構成を `Release | x64` に設定してビルドする。
+
+ビルド成功後、以下に DLL が生成される：
+
+```
+src/driver_yuna/bin/win64/driver_yuna.dll
+src/driver_yuna/bin/win64/openvr_api.dll  ← 自動コピー
+```
+
+### 5. SteamVR へのインストール
+
+```bat
+scripts\install_driver.bat
+```
+
+### 6. 動作確認
+
+```bat
+REM SteamVR を起動してから実行
+python apps\pose_sender.py --mode test
+```
+
+`[YUNA] Connection OK.` が表示されれば成功。
+
+アイドルループ（アバター直立）の確認：
+
+```bat
+python apps\pose_sender.py
+```
 
 ---
 
-## 🧠 設計思想
+## 🧠 アーキテクチャ
 
-* 正確な3D再現より「会話に十分な空間理解」を優先
-* 完璧な自然さより「壊れないシステム」を優先
-* 身体 → 会話 → 認識 → 振る舞い の順で拡張
+```
+apps/pose_sender.py
+  │  Named Pipe  \\.\pipe\YunaLinkPose
+  ▼
+driver_yuna.dll  (SteamVR ドライバ)
+  ├─ YunaHMD           ← 頭
+  ├─ YunaController    ← 左手
+  └─ YunaController    ← 右手
+  │  OpenVR Driver API
+  ▼
+SteamVR / VRChat
+```
+
+詳細は [`docs/architecture.md`](docs/architecture.md) を参照。
+
+---
+
+## 🛠️ 開発ステップ（仕様書より）
+
+### 初期版
+
+1. ✅ SteamVR仮想デバイス（本リポジトリ）
+2. 仮想デバイス制御ソフト
+3. 簡易状態管理
+4. 音声認識
+5. 小型LLM
+6. TTS
+7. SteamVR映像取得
+8. YOLO人物検出
+9. 距離概算
+
+### 最終目標への拡張
+
+1. 視線制御
+2. 手のジェスチャ
+3. YOLOモデル追加学習
+4. 対象追跡
+5. 距離推定高度化
+6. 会話対象切り替え高度化
+7. 複数人対応
 
 ---
 
 ## ⚠️ 技術的課題
 
-* VRChatアバターに対する検出精度
+* VRChatアバター（人外・非標準体型）への検出精度
 * 距離推定の安定性
 * 音声認識とTTSの干渉
 * LLMの応答品質
@@ -96,41 +169,14 @@ VRChat内で「人間のプレイヤーのように振る舞うAIアバター」
 
 ---
 
-## 🛠️ 開発ステップ
+## 📄 ドキュメント
 
-### 初期版
-
-1. SteamVR仮想デバイス
-2. 制御ソフト
-3. 状態管理
-4. 音声認識
-5. LLM
-6. TTS
-7. 映像取得
-8. 人物検出
-9. 距離推定
-
-### 拡張
-
-1. 視線制御
-2. ジェスチャ
-3. 検出モデル強化
-4. 対象追跡
-5. 距離精度向上
-6. 会話制御強化
-7. 複数人対応
+* [`docs/setup.md`](docs/setup.md) — 詳細セットアップ手順
+* [`docs/protocol.md`](docs/protocol.md) — Named Pipe 通信プロトコル仕様
+* [`docs/architecture.md`](docs/architecture.md) — システム構成
 
 ---
 
-## 📌 要約
+## 📄 仕様書
 
-* 初期版：1人と会話できるAIアバター
-* 最終目標：VRChat内で自然に振る舞うAIプレイヤー
-
----
-
-## 📄 仕様詳細
-
-詳細は以下の仕様書を参照：
-
-* VRChat-AIプレイヤー-仕様まとめ.txt
+詳細仕様は [`docs/architecture.md`](docs/architecture.md) を参照。

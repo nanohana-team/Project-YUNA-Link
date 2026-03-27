@@ -1,0 +1,7 @@
+{
+  "alwaysActivate": false,
+  "name": "yuna",
+  "directory": "",
+  "resourceOnly": false,
+  "shouldBlockStandbyMode": false
+}

@@ -1,2 +1,38 @@
-# Auto detect text files and perform LF normalization
+# Project YUNA Link — .gitattributes
+
+# デフォルト: 行末を自動正規化
 * text=auto
+
+# C++ ソース
+*.cpp   text eol=lf
+*.h     text eol=lf
+
+# Python
+*.py    text eol=lf
+
+# ドキュメント / 設定
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+
+# Windows バッチ（CRLF 必須）
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Visual Studio プロジェクト（CRLF 推奨）
+*.sln   text eol=crlf
+*.vcxproj      text eol=crlf
+*.vcxproj.user text eol=crlf
+
+# バイナリ（差分・正規化しない）
+*.dll   binary
+*.lib   binary
+*.pdb   binary
+*.pt    binary
+*.onnx  binary
+*.bin   binary
+*.safetensors binary
+*.png   binary
+*.jpg   binary
