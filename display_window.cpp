@@ -76,7 +76,7 @@ void DisplayWindow::WindowThread()
         return;
     }
 
-    RECT rc{0,0,(LONG)(m_eyeW*2),(LONG)m_eyeH};
+    RECT rc{0,0,1920,1080};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     m_hWnd = CreateWindowExA(0, cls, "YUNA Link - VR View",
         WS_OVERLAPPEDWINDOW|WS_VISIBLE,
@@ -131,7 +131,7 @@ bool DisplayWindow::InitD3D(HWND hWnd)
 {
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount=2;
-    sd.BufferDesc.Width=m_eyeW*2; sd.BufferDesc.Height=m_eyeH;
+    sd.BufferDesc.Width=1920; sd.BufferDesc.Height=1080;
     sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate={90,1};
     sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -185,8 +185,13 @@ bool DisplayWindow::InitD3D(HWND hWnd)
     m_dev->CreateSamplerState(&smpd,&m_sampler);
 
     D3D11_VIEWPORT vp{};
-    vp.Width=(float)(m_eyeW*2); vp.Height=(float)m_eyeH; vp.MaxDepth=1.f;
-    m_ctx->RSSetViewports(1,&vp);
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width    = 1920.0f;
+    vp.Height   = 1080.0f;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_ctx->RSSetViewports(1, &vp);
 
     return true;
 }
