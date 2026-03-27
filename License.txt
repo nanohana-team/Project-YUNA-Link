@@ -1,0 +1,53 @@
+YN License (Non-Commercial / No Direct Redistribution)
+
+Copyright (c) 2026 Nanoha
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software for personal, non-commercial use only, subject to the following conditions:
+
+1. Commercial use is strictly prohibited.
+   The Software may not be used for any commercial purposes, including but not limited to selling, licensing, monetization, or use within paid services.
+
+2. Direct redistribution is prohibited.
+   You may not redistribute the Software in its original, unmodified form.
+
+3. Redistribution of modified versions is permitted.
+   You may modify the Software and redistribute the modified versions, provided that:
+   - The modified version is clearly distinguished from the original.
+   - This license and copyright notice are included.
+
+4. Modification is permitted for personal, non-commercial use.
+
+5. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+[日本語版（参考訳）]
+
+本ソフトウェアおよび関連ドキュメントファイル（以下「本ソフトウェア」）の複製を取得したすべての人に対し、以下の条件のもとで、本ソフトウェアを無償で使用することを許可します。
+
+1. 商用利用は禁止します。
+   本ソフトウェアを販売、ライセンス、収益化、または有償サービス内で利用するなど、いかなる商用目的での利用も禁止します。
+
+2. 無改変での再配布は禁止します。
+   本ソフトウェアを改変せず、そのままの形で再配布することはできません。
+
+3. 改変版の再配布は許可されます。
+   以下の条件を満たす場合に限り、改変したソフトウェアの再配布を許可します。
+   - 改変版であることを明確に区別すること
+   - 本ライセンスおよび著作権表示を含めること
+
+4. 改変は非商用目的に限り許可されます。
+
+5. 本ソフトウェアのすべての複製または重要な部分には、上記の著作権表示および本許諾表示を含めるものとします。
+
+本ソフトウェアは「現状のまま」提供され、明示または黙示を問わず、商品性、特定目的への適合性、および権利非侵害を含むがこれらに限定されないいかなる保証もありません。
+著作者または著作権者は、契約、不法行為、その他の行為にかかわらず、本ソフトウェアの使用またはその他の取り扱いに起因または関連して生じたいかなる請求、損害、その他の責任についても一切責任を負いません。
