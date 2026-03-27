@@ -216,38 +216,28 @@ void DisplayWindow::Present(uint64_t sharedHandle)
 // ---------------------------------------------------------------------------
 void DisplayWindow::BlitShared(HANDLE hShared)
 {
-    // Open the compositor's texture on our device via the DXGI shared handle
     ID3D11Texture2D* sharedTex = nullptr;
     HRESULT hr = m_dev->OpenSharedResource(
         hShared, __uuidof(ID3D11Texture2D), (void**)&sharedTex);
-    if (FAILED(hr))
+    if (FAILED(hr) || !sharedTex) return;
+
+    IDXGIKeyedMutex* keyedMutex = nullptr;
+    hr = sharedTex->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&keyedMutex);
+    if (SUCCEEDED(hr) && keyedMutex)
     {
-        static bool s_logged = false;
-        if (!s_logged)
+        hr = keyedMutex->AcquireSync(0, 10);
+        if (hr != S_OK)
         {
-            DriverLog("[YUNA Display] OpenSharedResource failed 0x%08X"
-                      " handle=%p\n", (unsigned)hr, hShared);
-            s_logged = true;
+            keyedMutex->Release();
+            sharedTex->Release();
+            return;
         }
-        return;
     }
 
-    // Log first successful blit
-    static bool s_firstOk = false;
-    if (!s_firstOk)
-    {
-        D3D11_TEXTURE2D_DESC tmp{}; sharedTex->GetDesc(&tmp);
-        DriverLog("[YUNA Display] First blit OK: %ux%u fmt=%u\n",
-                  tmp.Width, tmp.Height, (unsigned)tmp.Format);
-        s_firstOk = true;
-    }
-
-    // Build SRV on the shared texture
     D3D11_TEXTURE2D_DESC desc{};
     sharedTex->GetDesc(&desc);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
-    // Force UNORM view in case format is TYPELESS
     switch (desc.Format)
     {
     case DXGI_FORMAT_R8G8B8A8_TYPELESS:
@@ -257,34 +247,41 @@ void DisplayWindow::BlitShared(HANDLE hShared)
     default:
         srvd.Format = desc.Format; break;
     }
-    srvd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srvd.Texture2D.MipLevels = 1;
 
     ID3D11ShaderResourceView* srv = nullptr;
     hr = m_dev->CreateShaderResourceView(sharedTex, &srvd, &srv);
-    sharedTex->Release();
-    if (FAILED(hr))
+    if (SUCCEEDED(hr) && srv)
     {
-        DriverLog("[YUNA Display] CreateSRV failed 0x%08X\n",(unsigned)hr);
-        return;
+        float clr[4] = {0,0,0,1};
+        m_ctx->ClearRenderTargetView(m_rtv, clr);
+        m_ctx->OMSetRenderTargets(1, &m_rtv, nullptr);
+
+        UINT stride = sizeof(Vtx), off = 0;
+        m_ctx->IASetInputLayout(m_layout);
+        m_ctx->IASetVertexBuffers(0, 1, &m_vb, &stride, &off);
+        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_ctx->VSSetShader(m_vs, nullptr, 0);
+        m_ctx->PSSetShader(m_ps, nullptr, 0);
+        m_ctx->PSSetShaderResources(0, 1, &srv);
+        m_ctx->PSSetSamplers(0, 1, &m_sampler);
+        m_ctx->Draw(6, 0);
+
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        m_ctx->PSSetShaderResources(0, 1, &nullSrv);
+
+        srv->Release();
+        m_swap->Present(0, 0);
     }
 
-    // Draw full-screen quad
-    float clr[4]={0,0,0,1};
-    m_ctx->ClearRenderTargetView(m_rtv,clr);
-    m_ctx->OMSetRenderTargets(1,&m_rtv,nullptr);
-    m_ctx->IASetInputLayout(m_layout);
-    UINT stride=sizeof(Vtx),off=0;
-    m_ctx->IASetVertexBuffers(0,1,&m_vb,&stride,&off);
-    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_ctx->VSSetShader(m_vs,nullptr,0);
-    m_ctx->PSSetShader(m_ps,nullptr,0);
-    m_ctx->PSSetShaderResources(0,1,&srv);
-    m_ctx->PSSetSamplers(0,1,&m_sampler);
-    m_ctx->Draw(6,0);
-    srv->Release();
+    if (keyedMutex)
+    {
+        keyedMutex->ReleaseSync(0);
+        keyedMutex->Release();
+    }
 
-    m_swap->Present(0,0);
+    sharedTex->Release();
 }
 
 // ---------------------------------------------------------------------------
