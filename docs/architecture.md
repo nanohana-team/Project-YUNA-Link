@@ -1,153 +1,220 @@
-# Project YUNA Link — アーキテクチャ概要
+# Project YUNA Link — 統合アーキテクチャ
 
-仕様書（`Project_YUNA_Link_仕様書.txt`）に基づくシステム構成のドキュメント。
+本ドキュメントは以下を統合した最終アーキテクチャ仕様である。
+
+* システム全体構成
+* OpenVR Driver 実装仕様
+* コントローラー入力制御
+* Python連携API（Pose/Input）
 
 ---
 
 ## システム全体図
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
-│  YUNA 制御プロセス（将来）                           │
+│  YUNA 制御プロセス                                  │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐  │
-│  │ 視覚系  │ │ 会話系  │ │ 制御系  │ │ 振る舞い │  │
-│  │  YOLO  │ │ASR+LLM │ │状態管理│ │  系      │  │
+│  │ 視覚系   │ │ 会話系  │ │ 制御系   │ │ 振る舞い │  │
+│  │  YOLO   │ │ASR+LLM  │ │状態管理  │ │  系      │  │
 │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬─────┘  │
 │       └───────────┴───────────┴────────────┘        │
 │                         │                           │
-│              apps/pose_sender.py                    │
+│         apps/pose_sender.py / input_sender.py       │
 └─────────────────────────┼───────────────────────────┘
                           │ Named Pipe
                           │ \\.\pipe\YunaLinkPose
 ┌─────────────────────────▼───────────────────────────┐
-│  driver_yuna.dll  (SteamVR OpenVR Driver)            │
+│  driver_yuna.dll  (OpenVR Driver)                   │
 │  ┌──────────────────────────────────────────────┐   │
-│  │  PoseServer  Named Pipe 受信スレッド          │   │
+│  │ PoseServer / InputServer 受信スレッド         │   │
 │  └──────┬───────────────────────────────────────┘   │
-│         │ DriverPose_t / ControllerInput             │
+│         │ 内部共有バッファ                           │
 │  ┌──────▼──────┐  ┌────────────┐  ┌────────────┐   │
-│  │  YunaHMD   │  │ YunaCtrl  │  │ YunaCtrl  │   │
-│  │   (頭)     │  │  (左手)   │  │  (右手)   │   │
+│  │  YunaHMD    │  │ YunaCtrl   │  │ YunaCtrl   │   │
+│  │   (頭)      │  │  (左手)     │  │  (右手)    │   │
 │  └──────┬──────┘  └─────┬──────┘  └─────┬──────┘   │
 └─────────┼───────────────┼───────────────┼───────────┘
-          │  OpenVR Driver API            │
-┌─────────▼───────────────▼───────────────▼───────────┐
-│  SteamVR                                             │
-└─────────────────────────┬───────────────────────────┘
-                          │  VR トラッキング
-┌─────────────────────────▼───────────────────────────┐
-│  VRChat                                              │
-│  （YUNA アバターが頭・両手を持つ存在として動作）       │
-└─────────────────────────────────────────────────────┘
+          │ OpenVR Driver API
+┌─────────▼──────────────────────────────────────────┐
+│ SteamVR                                            │
+└─────────┬──────────────────────────────────────────┘
+          │ トラッキング / 入力
+┌─────────▼──────────────────────────────────────────┐
+│ VRChat                                             │
+└────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## コンポーネント説明
+## データフロー
 
-### `src/driver_main.cpp` — ドライバエントリポイント
-
-SteamVR が DLL をロードする際に呼ぶ `HmdDriverFactory` を提供する。
-`YunaDriverProvider` がデバイス群（HMD・左右コントローラ）を SteamVR に登録し、
-毎フレーム `RunFrame()` を呼ぶ。
-
-### `src/hmd_device.cpp` — 仮想 HMD
-
-`ITrackedDeviceServerDriver` と `IVRDisplayComponent` を実装。
-`IVRDisplayComponent` は仮想ディスプレイとして機能させるために必要。
-映像は実際には表示しない（SteamVR がアバターに使う位置・回転情報のみが目的）。
-
-### `src/controller_device.cpp` — 仮想コントローラ
-
-左手・右手を同一クラスで実装。`TrackedControllerRole` で左右を区別。
-ボタン・スティック入力コンポーネントを登録し、VRChat の Avatar Dynamics 等に対応。
-
-### `src/pose_server.cpp` — Named Pipe 受信サーバー
-
-別スレッドで Named Pipe を待ち受け、受信したパケットを
-`std::mutex` 保護された内部バッファに書き込む。
-`HMD::GetPose()` / `Controller::GetPose()` はこのバッファを読む。
-
-### `apps/pose_sender.py` — Python 送信クライアント
-
-`YunaPoseSender` クラスが Named Pipe へバイナリパケットを送る。
-将来的には YOLO 検出結果・LLM 応答・TTS タイミングをここで統合する。
-
----
-
-## 初期版 状態遷移
-
-```
-        ┌─────────┐
-  起動  │  待機   │◀──────────────────────────────┐
-  ───▶  └────┬────┘                               │
-             │ 人物検出                             │
-        ┌────▼────┐                               │
-        │対象検出  │                               │
-        └────┬────┘                               │
-             │ 話しかけられた                        │
-        ┌────▼─────┐                              │
-        │聞き取り中 │                              │
-        └────┬─────┘                              │
-             │ 認識完了                             │
-        ┌────▼──────┐                             │
-        │応答生成中  │                             │
-        └────┬──────┘                             │
-             │ 生成完了                             │
-        ┌────▼────┐                               │
-        │ 発話中  │                               │
-        └────┬────┘                               │
-             │ 発話終了                             │
-        ┌────▼──────┐                             │
-        │クールダウン│─────────────────────────────┘
-        └───────────┘
+```text
+Python制御
+  → FramePacket生成
+    → Named Pipe送信
+      → Pose/Input受信
+        → 内部状態更新
+          → RunFrame
+            → SteamVR
 ```
 
 ---
 
-## データフロー（初期版）
+## OpenVR Driver 設計
 
+### 採用インターフェース
+
+* IServerTrackedDeviceProvider
+* ITrackedDeviceServerDriver
+* IVRDisplayComponent
+* IVRDriverInput
+
+### ライフサイクル
+
+```text
+Init
+ → TrackedDeviceAdded
+   → Activate
+     → RunFrameループ
 ```
-SteamVR 映像
-  → YOLO 人物検出
-    → 距離カテゴリ判定（近 / 中 / 遠）
-      → 制御系：会話対象選択
 
-マイク入力
-  → 音声認識（ASR）
-    → 小型 LLM
-      → TTS
-        → スピーカー出力
+### 実装ルール
 
-制御系
-  → pose_sender.py
-    → driver_yuna.dll
-      → SteamVR トラッキング更新
+* RunFrameは軽量に保つ
+* 外部受信スレッドから直接SteamVR APIを叩かない
+* 内部バッファ経由で状態を反映
+
+---
+
+## 仮想デバイス構成
+
+### デバイス一覧
+
+* HMD
+* 左コントローラー
+* 右コントローラー
+
+### コントローラー仕様
+
+* DeviceClass: Controller
+* Role:
+
+  * 左: LeftHand
+  * 右: RightHand
+
+### 入力コンポーネント
+
+* /input/a/click
+* /input/start/click
+* /input/thumbstick/x
+* /input/thumbstick/y
+
+---
+
+## Python連携API（統合仕様）
+
+### 通信
+
+* Named Pipe
+* 1フレーム = 1パケット
+
+### FramePacket
+
+```cpp
+struct Vec3 { float x, y, z; };
+struct Quat { float x, y, z, w; };
+
+struct ControllerPose {
+    Vec3 position;
+    Quat rotation;
+    bool trackingValid;
+    bool connected;
+};
+
+struct ControllerInput {
+    bool aButton;
+    float stickX;
+    float stickY;
+};
+
+struct FramePacket {
+    uint64_t frameId;
+    double timestamp;
+
+    ControllerPose leftPose;
+    ControllerPose rightPose;
+
+    ControllerInput leftInput;
+    ControllerInput rightInput;
+
+    bool startButton;
+};
 ```
 
 ---
 
-## 実装優先順位（仕様書準拠）
+## 座標系
 
-### 初期版
+* 単位: メートル
+* +X: 右
+* +Y: 上
+* -Z: 前
+* 回転: クォータニオン
 
-1. ✅ SteamVR 仮想デバイス（本コンポーネント）
-2. 仮想デバイス簡易制御ソフト
-3. 簡易状態管理の骨組み
-4. 音声認識
-5. 小型 LLM
-6. TTS
-7. SteamVR 映像取得 API
-8. YOLO 人物検出
-9. 距離概算システム
+---
 
-### 最終目標への拡張
+## 入力制御
 
-1. 視線制御
-2. 手の簡易ジェスチャ
-3. YOLO 追加学習（人外・ケモノ系・非標準体型アバター）
-4. 対象追跡
-5. 距離推定高度化（左右眼差分）
-6. 会話対象切り替え高度化
-7. 複数人会話対応
-8. 身体動作と会話の同期強化
+### 内部状態
+
+```cpp
+struct HandInputState {
+    bool aButton;
+    float stickX;
+    float stickY;
+};
+
+struct GlobalInputState {
+    bool startButton;
+    HandInputState left;
+    HandInputState right;
+};
+```
+
+---
+
+## フェイルセーフ
+
+* 250ms無通信 → tracking無効
+* 切断時 → 入力リセット
+
+---
+
+## 更新周期
+
+* 60Hz 推奨
+* 最大90Hz
+
+---
+
+## 拡張性
+
+将来的に以下へ拡張可能
+
+* trigger / grip
+* skeletal input
+* 視線制御
+* ジェスチャ制御
+* 複数人対応
+
+---
+
+## 設計まとめ
+
+* Pythonからフレーム単位で制御
+* Driver側はバッファ同期
+* PoseとInput統合
+* OpenVRに安全に反映
+
+この構成により、AIによる身体制御・会話・視覚処理を統合可能な基盤を構築する。
