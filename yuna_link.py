@@ -113,7 +113,7 @@ assert struct.calcsize(_HMD_FMT) == 57
 # rightInput: same
 # startButton(B)
 _FRAME_FMT = "<Qd" + "7fBB" + "7fBB" + "Bff" + "Bff" + "B"
-assert struct.calcsize(_FRAME_FMT) == 93
+assert struct.calcsize(_FRAME_FMT) == 95
 
 
 def _pack_header(pkt_type: int, body_len: int) -> bytes:

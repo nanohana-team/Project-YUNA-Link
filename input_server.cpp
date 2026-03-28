@@ -151,9 +151,9 @@ void InputServer::HandleLine(const char* line)
         if (strncmp(r, "A ", 2) == 0)
         { bool v = r[2]!='0'; m_state->cmdSetA(v); DriverLog("[INPUT] A=%d\n",(int)v); return; }
         if (strncmp(r, "L_STICK ", 8) == 0)
-        { float x=0,y=0; if(sscanf(r+8,"%f %f",&x,&y)==2){ m_state->cmdSetLeftStick(x,y); DriverLog("[INPUT] L_STICK=(%.2f,%.2f)\n",x,y); } return; }
+        { float x=0,y=0; if(sscanf_s(r+8,"%f %f",&x,&y)==2){ m_state->cmdSetLeftStick(x,y); DriverLog("[INPUT] L_STICK=(%.2f,%.2f)\n",x,y); } return; }
         if (strncmp(r, "R_STICK ", 8) == 0)
-        { float x=0,y=0; if(sscanf(r+8,"%f %f",&x,&y)==2){ m_state->cmdSetRightStick(x,y); DriverLog("[INPUT] R_STICK=(%.2f,%.2f)\n",x,y); } return; }
+        { float x=0,y=0; if(sscanf_s(r+8,"%f %f",&x,&y)==2){ m_state->cmdSetRightStick(x,y); DriverLog("[INPUT] R_STICK=(%.2f,%.2f)\n",x,y); } return; }
     }
 
     DriverLog("[INPUT] Unknown: %s\n", line);

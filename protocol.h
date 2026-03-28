@@ -92,7 +92,7 @@ enum PacketType : uint8_t
 
 #pragma pack(pop)
 
-static_assert(sizeof(HmdPosePacket)        == 57,  "HmdPosePacket size mismatch");
-static_assert(sizeof(ControllerPoseData)   == 30,  "ControllerPoseData size mismatch");
-static_assert(sizeof(ControllerInputData)  ==  9,  "ControllerInputData size mismatch");
-static_assert(sizeof(FramePacket)          == 93,  "FramePacket size mismatch");
+static_assert(sizeof(HmdPosePacket)        == 57, "HmdPosePacket size mismatch");
+static_assert(sizeof(ControllerPoseData)   == 30, "ControllerPoseData size mismatch");
+static_assert(sizeof(ControllerInputData)  ==  9, "ControllerInputData size mismatch");
+static_assert(sizeof(FramePacket)          == 95, "FramePacket size mismatch");
