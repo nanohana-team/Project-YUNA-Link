@@ -1,0 +1,103 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "oculus_touch",
+  "device_class": "controller",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/system": {
+      "type": "button",
+      "click_activate_threshold": 0.5,
+      "binding_image_point": [100, 30]
+    },
+    "/input/application_menu": {
+      "type": "button",
+      "click_activate_threshold": 0.5,
+      "binding_image_point": [100, 60]
+    },
+    "/input/trigger": {
+      "type": "trigger",
+      "click_activate_threshold": 0.7,
+      "binding_image_point": [200, 100]
+    },
+    "/input/squeeze": {
+      "type": "trigger",
+      "click_activate_threshold": 0.7,
+      "binding_image_point": [200, 150]
+    },
+    "/input/thumbstick": {
+      "type": "joystick",
+      "click_activate_threshold": 0.5,
+      "binding_image_point": [150, 200],
+      "inputs": {
+        "position": {},
+        "click": {},
+        "touch": {}
+      }
+    },
+    "/input/x": {
+      "type": "button",
+      "click_activate_threshold": 0.5,
+      "binding_image_point": [80, 100]
+    },
+    "/input/y": {
+      "type": "button",
+      "click_activate_threshold": 0.5,
+      "binding_image_point": [80, 130]
+    },
+    "/output/haptic": {
+      "type": "vibration"
+    }
+  },
+  "legacy_bindings": {
+    "single_stage_actions": [
+      {
+        "output_action": { "input_source": "/input/system/click" },
+        "input_action": { "input_source": "/input/system", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/application_menu/click" },
+        "input_action": { "input_source": "/input/application_menu", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/trigger/click" },
+        "input_action": { "input_source": "/input/trigger", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/trigger/value" },
+        "input_action": { "input_source": "/input/trigger", "input_type": "value" }
+      },
+      {
+        "output_action": { "input_source": "/input/squeeze/click" },
+        "input_action": { "input_source": "/input/squeeze", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/squeeze/value" },
+        "input_action": { "input_source": "/input/squeeze", "input_type": "value" }
+      },
+      {
+        "output_action": { "input_source": "/input/thumbstick/x" },
+        "input_action": { "input_source": "/input/thumbstick", "input_type": "position", "axis_type": "x" }
+      },
+      {
+        "output_action": { "input_source": "/input/thumbstick/y" },
+        "input_action": { "input_source": "/input/thumbstick", "input_type": "position", "axis_type": "y" }
+      },
+      {
+        "output_action": { "input_source": "/input/thumbstick/click" },
+        "input_action": { "input_source": "/input/thumbstick", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/thumbstick/touch" },
+        "input_action": { "input_source": "/input/thumbstick", "input_type": "touch" }
+      },
+      {
+        "output_action": { "input_source": "/input/x/click" },
+        "input_action": { "input_source": "/input/x", "input_type": "click" }
+      },
+      {
+        "output_action": { "input_source": "/input/y/click" },
+        "input_action": { "input_source": "/input/y", "input_type": "click" }
+      }
+    ]
+  }
+}

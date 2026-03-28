@@ -96,8 +96,43 @@ copy /Y "%REPO_ROOT%\src\driver_yuna\driver.vrdrivermanifest" "!INSTALL_DIR!\"
 if errorlevel 1 ( echo [ERROR] Failed to copy driver.vrdrivermanifest & pause & exit /b 1 )
 
 echo [COPY] resources\ ...
-xcopy /E /I /Y "%REPO_ROOT%\src\driver_yuna\resources" "!INSTALL_DIR!\resources" >nul
-if errorlevel 1 ( echo [ERROR] Failed to copy resources & pause & exit /b 1 )
+robocopy "%REPO_ROOT%\src\driver_yuna\resources" "!INSTALL_DIR!\resources" /E /NFL /NDL /NJH /NJS
+REM robocopy returns 0-7 for success (0=no change, 1=copied, 3=extras, etc.)
+REM Only 8+ means actual errors
+if errorlevel 8 ( echo [ERROR] Failed to copy resources & pause & exit /b 1 )
+echo [OK] resources copied.
+
+REM --- Verify critical resource files exist ---
+echo.
+echo [VERIFY] Checking installed resource files...
+set "FAIL=0"
+
+set "L_JSON=!INSTALL_DIR!\resources\input\oculus_touch_profile_left.json"
+set "R_JSON=!INSTALL_DIR!\resources\input\oculus_touch_profile_right.json"
+
+if exist "!L_JSON!" (
+    echo [OK]   !L_JSON!
+) else (
+    echo [ERROR] MISSING: !L_JSON!
+    echo         ^> {yuna}/input/... will fail to resolve in SteamVR!
+    set "FAIL=1"
+)
+
+if exist "!R_JSON!" (
+    echo [OK]   !R_JSON!
+) else (
+    echo [ERROR] MISSING: !R_JSON!
+    echo         ^> {yuna}/input/... will fail to resolve in SteamVR!
+    set "FAIL=1"
+)
+
+if "!FAIL!"=="1" (
+    echo.
+    echo [ERROR] One or more resource files are missing.
+    echo         joystick/grip will NOT work until these files are present.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================================
@@ -108,9 +143,19 @@ echo.
 echo  Installed files:
 dir /b "!INSTALL_DIR!\bin\win64\"
 echo.
+echo  Input profiles:
+dir /b "!INSTALL_DIR!\resources\input\"
+echo.
+echo  IMPORTANT - If joystick/grip still don't work:
+echo    1. Run scripts\clear_steamvr_binding_cache.bat
+echo    2. Restart SteamVR completely
+echo    3. Check SteamVR log for:
+echo       "Failed to load input profile" lines
+echo       If present, the JSON files above were not found by SteamVR.
+echo.
 echo  Next steps:
 echo    1. Restart SteamVR
-echo    2. Run: python apps\pose_sender.py --mode test
+echo    2. Run: python apps\yuna_link.py --mode idle
 echo ============================================================
 echo.
 pause

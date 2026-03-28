@@ -1,0 +1,44 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "oculus_touch",
+  "device_class": "controller",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/system": {
+      "type": "button",
+      "click_activate_threshold": 0.5
+    },
+    "/input/application_menu": {
+      "type": "button",
+      "click_activate_threshold": 0.5
+    },
+    "/input/trigger": {
+      "type": "trigger",
+      "click_activate_threshold": 0.7
+    },
+    "/input/grip": {
+      "type": "trigger",
+      "click_activate_threshold": 0.7
+    },
+    "/input/joystick": {
+      "type": "joystick",
+      "click_activate_threshold": 0.5,
+      "inputs": {
+        "position": {},
+        "click": {},
+        "touch": {}
+      }
+    },
+    "/input/x": {
+      "type": "button",
+      "click_activate_threshold": 0.5
+    },
+    "/input/y": {
+      "type": "button",
+      "click_activate_threshold": 0.5
+    },
+    "/output/haptic": {
+      "type": "vibration"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "alwaysActivate": true,
+  "name": "yuna",
+  "directory": "",
+  "resourceOnly": false,
+  "shouldBlockStandbyMode": false,
+  "hmd_presence": ["*.*"]
+}

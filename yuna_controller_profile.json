@@ -4,8 +4,14 @@
   "device_class": "controller",
   "input_bindingui_mode": "controller_handed",
   "input_source": {
-    "/input/start":      { "type": "button", "click_activate_threshold": 0.5 },
-    "/input/a":          { "type": "button", "click_activate_threshold": 0.5 },
+    "/input/start":      { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/menu":       { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/a":          { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/b":          { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/x":          { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/y":          { "type": "button",  "click_activate_threshold": 0.5 },
+    "/input/trigger":    { "type": "trigger"  },
+    "/input/grip":       { "type": "trigger"  },
     "/input/thumbstick": { "type": "joystick" }
   }
 }
