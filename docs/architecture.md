@@ -105,10 +105,37 @@ Init
 
 ### 入力コンポーネント
 
-* /input/a/click
-* /input/start/click
+#### 左右共通
+
+* /input/trigger/value
+* /input/grip/value
 * /input/thumbstick/x
 * /input/thumbstick/y
+* /input/menu/click
+
+#### 右手
+
+* /input/a/click
+* /input/b/click
+
+#### 左手
+
+* /input/x/click
+* /input/y/click
+
+### 論理入力対応
+
+* L Trigger
+* R Trigger
+* L Grip
+* R Grip
+* A Button
+* B Button
+* X Button
+* Y Button
+* Menu Button
+* 左スティック入力
+* 右スティック入力
 
 ---
 
@@ -134,6 +161,14 @@ struct ControllerPose {
 
 struct ControllerInput {
     bool aButton;
+    bool bButton;
+    bool xButton;
+    bool yButton;
+    bool menuButton;
+
+    float trigger;
+    float grip;
+
     float stickX;
     float stickY;
 };
@@ -147,10 +182,16 @@ struct FramePacket {
 
     ControllerInput leftInput;
     ControllerInput rightInput;
-
-    bool startButton;
 };
 ```
+
+### 実運用ルール
+
+* 右手では aButton / bButton を主に使用する
+* 左手では xButton / yButton を主に使用する
+* 使用しないボタンは false を送る
+* trigger / grip は 0.0〜1.0 の範囲で送る
+* stickX / stickY は -1.0〜1.0 の範囲で送る
 
 ---
 
@@ -171,16 +212,40 @@ struct FramePacket {
 ```cpp
 struct HandInputState {
     bool aButton;
+    bool bButton;
+    bool xButton;
+    bool yButton;
+    bool menuButton;
+
+    float trigger;
+    float grip;
+
     float stickX;
     float stickY;
 };
 
-struct GlobalInputState {
-    bool startButton;
+struct InputState {
     HandInputState left;
     HandInputState right;
 };
 ```
+
+### OpenVR反映方針
+
+* trigger / grip は UpdateScalarComponent で反映
+* thumbstick は x / y を個別ScalarComponentとして反映
+* a / b / x / y / menu は UpdateBooleanComponent で反映
+* ボタン割り当ては左右手ごとの実デバイス構成に合わせる
+* Input受信スレッドは共有バッファのみ更新し、SteamVR API呼び出しはRunFrame側で行う
+
+### 推奨閾値
+
+必要に応じて内部で以下のような押下判定を持てる。
+
+* triggerClick: trigger >= 0.8
+* gripClick: grip >= 0.8
+
+ただし初期実装ではアナログ値そのものを優先して送る。
 
 ---
 
@@ -188,6 +253,9 @@ struct GlobalInputState {
 
 * 250ms無通信 → tracking無効
 * 切断時 → 入力リセット
+* 切断時 → trigger / grip を 0.0 に戻す
+* 切断時 → 全ボタンを false に戻す
+* 切断時 → スティックを 0.0 に戻す
 
 ---
 
@@ -202,11 +270,12 @@ struct GlobalInputState {
 
 将来的に以下へ拡張可能
 
-* trigger / grip
 * skeletal input
 * 視線制御
 * ジェスチャ制御
 * 複数人対応
+* 指ごとの入力表現
+* haptic feedback
 
 ---
 
@@ -215,6 +284,7 @@ struct GlobalInputState {
 * Pythonからフレーム単位で制御
 * Driver側はバッファ同期
 * PoseとInput統合
+* Trigger / Grip / ABXY / Menu を統合入力として扱う
 * OpenVRに安全に反映
 
 この構成により、AIによる身体制御・会話・視覚処理を統合可能な基盤を構築する。
