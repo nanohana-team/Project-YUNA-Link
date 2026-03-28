@@ -1,0 +1,11 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "yuna_controller",
+  "device_class": "controller",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/start":      { "type": "button", "click_activate_threshold": 0.5 },
+    "/input/a":          { "type": "button", "click_activate_threshold": 0.5 },
+    "/input/thumbstick": { "type": "joystick" }
+  }
+}

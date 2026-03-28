@@ -193,6 +193,7 @@
     <ClCompile Include="hmd_device.cpp" />
     <ClCompile Include="controller_device.cpp" />
     <ClCompile Include="pose_server.cpp" />
+    <ClCompile Include="input_server.cpp" />
     <ClCompile Include="display_window.cpp" />
   </ItemGroup>
 
@@ -202,6 +203,9 @@
     <ClInclude Include="hmd_device.h" />
     <ClInclude Include="controller_device.h" />
     <ClInclude Include="pose_server.h" />
+    <ClInclude Include="input_server.h" />
+    <ClInclude Include="shared_state.h" />
+    <ClInclude Include="protocol.h" />
     <ClInclude Include="display_window.h" />
   </ItemGroup>
 

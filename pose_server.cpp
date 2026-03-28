@@ -2,53 +2,54 @@
 
 #include "driver_main.h"
 #include "pose_server.h"
+#include "protocol.h"
+#include <cstring>
 
 // ---------------------------------------------------------------------------
-// Static helpers
+// Helpers: build DriverPose_t from packet data
 // ---------------------------------------------------------------------------
-vr::DriverPose_t PoseServer::DefaultPose(double x, double y, double z)
+static vr::DriverPose_t buildFromHmd(const HmdPosePacket& p)
 {
-    vr::DriverPose_t p{};
-    p.poseIsValid                = false;
-    p.deviceIsConnected          = true;
-    p.result                     = vr::TrackingResult_Running_OK;
-    p.vecPosition[0]             = x;
-    p.vecPosition[1]             = y;
-    p.vecPosition[2]             = z;
-    p.qRotation.w                = 1.0;
-    p.qWorldFromDriverRotation.w = 1.0;
-    p.qDriverFromHeadRotation.w  = 1.0;
-    return p;
+    vr::DriverPose_t d{};
+    d.poseIsValid                = true;
+    d.result                     = vr::TrackingResult_Running_OK;
+    d.deviceIsConnected          = true;
+    d.vecPosition[0]             = p.px;
+    d.vecPosition[1]             = p.py;
+    d.vecPosition[2]             = p.pz;
+    d.qRotation.w                = p.qw;
+    d.qRotation.x                = p.qx;
+    d.qRotation.y                = p.qy;
+    d.qRotation.z                = p.qz;
+    d.qWorldFromDriverRotation.w = 1.0;
+    d.qDriverFromHeadRotation.w  = 1.0;
+    return d;
 }
 
-vr::DriverPose_t PoseServer::BuildPose(const YunaPosePacket& pkt)
+static vr::DriverPose_t buildFromCtrl(const ControllerPoseData& cp)
 {
-    vr::DriverPose_t p{};
-    p.poseIsValid                = true;
-    p.result                     = vr::TrackingResult_Running_OK;
-    p.deviceIsConnected          = true;
-    p.vecPosition[0]             = pkt.px;
-    p.vecPosition[1]             = pkt.py;
-    p.vecPosition[2]             = pkt.pz;
-    p.qRotation.w                = pkt.qw;
-    p.qRotation.x                = pkt.qx;
-    p.qRotation.y                = pkt.qy;
-    p.qRotation.z                = pkt.qz;
-    p.qWorldFromDriverRotation.w = 1.0;
-    p.qDriverFromHeadRotation.w  = 1.0;
-    return p;
+    vr::DriverPose_t d{};
+    d.poseIsValid                = cp.trackingValid != 0;
+    d.result                     = vr::TrackingResult_Running_OK;
+    d.deviceIsConnected          = cp.connected != 0;
+    d.vecPosition[0]             = cp.px;
+    d.vecPosition[1]             = cp.py;
+    d.vecPosition[2]             = cp.pz;
+    d.qRotation.x                = cp.qx;
+    d.qRotation.y                = cp.qy;
+    d.qRotation.z                = cp.qz;
+    d.qRotation.w                = cp.qw;
+    d.qWorldFromDriverRotation.w = 1.0;
+    d.qDriverFromHeadRotation.w  = 1.0;
+    return d;
 }
 
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
-PoseServer::PoseServer()
+PoseServer::PoseServer(SharedState* state)
+    : m_state(state)
 {
-    m_hmdPose   = DefaultPose( 0.0,  1.6,  0.0);
-    m_leftPose  = DefaultPose(-0.25, 1.1, -0.1);
-    m_rightPose = DefaultPose( 0.25, 1.1, -0.1);
-
-    // Manual-reset event used to signal the server thread to exit
     m_stopEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
 }
 
@@ -62,31 +63,23 @@ PoseServer::~PoseServer()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Start / Stop
-// ---------------------------------------------------------------------------
 void PoseServer::Start()
 {
-    if (m_running.exchange(true)) return;   // already running
+    if (m_running.exchange(true)) return;
     ResetEvent(m_stopEvent);
     m_thread = std::thread(&PoseServer::ServerThread, this);
+    DriverLog("[YUNA] PoseServer listening on %s\n", YUNA_PIPE_NAME);
 }
 
 void PoseServer::Stop()
 {
-    if (!m_running.exchange(false)) return; // already stopped
-
-    // Signal the server thread to exit - no dummy pipe connection needed
-    if (m_stopEvent != INVALID_HANDLE_VALUE)
-        SetEvent(m_stopEvent);
-
-    if (m_thread.joinable())
-        m_thread.join();
+    if (!m_running.exchange(false)) return;
+    if (m_stopEvent != INVALID_HANDLE_VALUE) SetEvent(m_stopEvent);
+    if (m_thread.joinable()) m_thread.join();
 }
 
 // ---------------------------------------------------------------------------
-// ReadExact: read exactly `bytes` bytes, return false on error / stop signal
-// Uses overlapped I/O so we can respect m_stopEvent
+// ReadExact: overlapped read, respects m_stopEvent
 // ---------------------------------------------------------------------------
 bool PoseServer::ReadExact(HANDLE hPipe, void* buf, DWORD bytes)
 {
@@ -95,35 +88,24 @@ bool PoseServer::ReadExact(HANDLE hPipe, void* buf, DWORD bytes)
     {
         OVERLAPPED ov{};
         ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-        if (ov.hEvent == nullptr) return false;
+        if (!ov.hEvent) return false;
 
         DWORD read = 0;
         BOOL ok = ReadFile(hPipe,
                            static_cast<BYTE*>(buf) + total,
                            bytes - total, &read, &ov);
-
         if (!ok && GetLastError() == ERROR_IO_PENDING)
         {
-            // Wait for either data or stop signal
-            HANDLE handles[2] = { ov.hEvent, m_stopEvent };
-            DWORD waited = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-
-            if (waited == WAIT_OBJECT_0)
+            HANDLE h[2] = { ov.hEvent, m_stopEvent };
+            if (WaitForMultipleObjects(2, h, FALSE, INFINITE) != WAIT_OBJECT_0)
             {
-                // Data arrived
-                ok = GetOverlappedResult(hPipe, &ov, &read, FALSE);
-            }
-            else
-            {
-                // Stop event or error
                 CancelIo(hPipe);
                 CloseHandle(ov.hEvent);
                 return false;
             }
+            ok = GetOverlappedResult(hPipe, &ov, &read, FALSE);
         }
-
         CloseHandle(ov.hEvent);
-
         if (!ok || read == 0) return false;
         total += read;
     }
@@ -131,32 +113,28 @@ bool PoseServer::ReadExact(HANDLE hPipe, void* buf, DWORD bytes)
 }
 
 // ---------------------------------------------------------------------------
-// Server thread: one client at a time, overlapped pipe
+// ServerThread
 // ---------------------------------------------------------------------------
 void PoseServer::ServerThread()
 {
     while (m_running)
     {
-        // Create pipe in overlapped mode so ConnectNamedPipe is non-blocking
         HANDLE hPipe = CreateNamedPipeA(
             YUNA_PIPE_NAME,
             PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,      // only one instance needed
-            0, 4096, 0, nullptr);
+            1, 0, 4096, 0, nullptr);
 
         if (hPipe == INVALID_HANDLE_VALUE)
         {
             DriverLog("[YUNA] CreateNamedPipe failed (%lu)\n", GetLastError());
-            // Wait a second or until stop, then retry
             WaitForSingleObject(m_stopEvent, 1000);
             continue;
         }
 
-        // Overlapped connect - wait for client or stop event
+        // Wait for client
         OVERLAPPED ov{};
         ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-
         BOOL connected = ConnectNamedPipe(hPipe, &ov);
         DWORD err = GetLastError();
 
@@ -164,113 +142,88 @@ void PoseServer::ServerThread()
         {
             if (err == ERROR_IO_PENDING)
             {
-                HANDLE handles[2] = { ov.hEvent, m_stopEvent };
-                DWORD waited = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-                if (waited != WAIT_OBJECT_0)
+                HANDLE h[2] = { ov.hEvent, m_stopEvent };
+                if (WaitForMultipleObjects(2, h, FALSE, INFINITE) != WAIT_OBJECT_0)
                 {
-                    // Stop requested while waiting for client
                     CancelIo(hPipe);
-                    CloseHandle(ov.hEvent);
-                    CloseHandle(hPipe);
+                    CloseHandle(ov.hEvent); CloseHandle(hPipe);
                     break;
                 }
-                DWORD dummy;
-                connected = GetOverlappedResult(hPipe, &ov, &dummy, FALSE);
+                DWORD d;
+                connected = GetOverlappedResult(hPipe, &ov, &d, FALSE);
             }
             else if (err == ERROR_PIPE_CONNECTED)
             {
                 connected = TRUE;
             }
         }
-
         CloseHandle(ov.hEvent);
 
-        if (connected && m_running)
+        if (!connected || !m_running)
         {
-            DriverLog("[YUNA] Client connected\n");
-
-            // Read packets until disconnect or stop
-            while (m_running)
-            {
-                YunaPacketHeader hdr{};
-                if (!ReadExact(hPipe, &hdr, sizeof(hdr))) break;
-
-                if (hdr.type == YunaPacketType::Pose
-                    && hdr.length == sizeof(YunaPosePacket))
-                {
-                    YunaPosePacket pkt{};
-                    if (!ReadExact(hPipe, &pkt, sizeof(pkt))) break;
-                    ApplyPosePacket(pkt);
-                }
-                else if (hdr.type == YunaPacketType::Input
-                         && hdr.length == sizeof(YunaInputPacket))
-                {
-                    YunaInputPacket pkt{};
-                    if (!ReadExact(hPipe, &pkt, sizeof(pkt))) break;
-                    ApplyInputPacket(pkt);
-                }
-                else
-                {
-                    // Unknown packet: skip payload
-                    std::vector<uint8_t> skip(hdr.length);
-                    if (!ReadExact(hPipe, skip.data(), hdr.length)) break;
-                }
-            }
-
-            DriverLog("[YUNA] Client disconnected\n");
+            DisconnectNamedPipe(hPipe); CloseHandle(hPipe);
+            continue;
         }
+
+        DriverLog("[YUNA] Client connected\n");
+        m_state->resetLastRecv();
+
+        while (m_running)
+        {
+            PacketHeader hdr{};
+            if (!ReadExact(hPipe, &hdr, sizeof(hdr))) break;
+
+            std::vector<uint8_t> body(hdr.length);
+            if (hdr.length > 0 && !ReadExact(hPipe, body.data(), hdr.length)) break;
+
+            DispatchPacket(hdr.type, body);
+        }
+
+        // Disconnect: reset input for safety
+        m_state->cmdReset();
+        DriverLog("[YUNA] Client disconnected, state reset\n");
 
         DisconnectNamedPipe(hPipe);
         CloseHandle(hPipe);
     }
-
     DriverLog("[YUNA] PoseServer thread exiting\n");
 }
 
 // ---------------------------------------------------------------------------
-// Packet application
+// DispatchPacket
 // ---------------------------------------------------------------------------
-void PoseServer::ApplyPosePacket(const YunaPosePacket& pkt)
+void PoseServer::DispatchPacket(uint8_t type, const std::vector<uint8_t>& body)
 {
-    std::lock_guard<std::mutex> lk(m_mutex);
-    switch (pkt.device)
+    if (type == PKT_HMD_POSE && body.size() == sizeof(HmdPosePacket))
     {
-    case YunaDeviceType::HMD:
-        m_hmdPose   = BuildPose(pkt); m_hasHMD   = true; break;
-    case YunaDeviceType::CtrlLeft:
-        m_leftPose  = BuildPose(pkt); m_hasLeft  = true; break;
-    case YunaDeviceType::CtrlRight:
-        m_rightPose = BuildPose(pkt); m_hasRight = true; break;
-    default: break;
+        HmdPosePacket p{};
+        memcpy(&p, body.data(), sizeof(p));
+        m_state->setHmdPose(buildFromHmd(p));
     }
+    else if (type == PKT_FRAME && body.size() == sizeof(FramePacket))
+    {
+        FramePacket fp{};
+        memcpy(&fp, body.data(), sizeof(fp));
+
+        ControllerState left, right;
+        left.pose     = buildFromCtrl(fp.leftPose);
+        left.hasPose  = true;
+        left.input.aButton = false;  // aButton is right-hand only per spec
+        left.input.stickX  = fp.leftInput.stickX;
+        left.input.stickY  = fp.leftInput.stickY;
+
+        right.pose     = buildFromCtrl(fp.rightPose);
+        right.hasPose  = true;
+        right.input.aButton = fp.rightInput.aButton != 0;
+        right.input.stickX  = fp.rightInput.stickX;
+        right.input.stickY  = fp.rightInput.stickY;
+
+        GlobalInputState gs{};
+        gs.startButton   = fp.startButton != 0;
+        gs.left          = left.input;
+        gs.right         = right.input;
+
+        m_state->setFrame(left, right, gs);
+    }
+    // else: unknown packet, silently skip
 }
-
-void PoseServer::ApplyInputPacket(const YunaInputPacket& pkt)
-{
-    ControllerInput in;
-    in.triggerClick = pkt.triggerClick;
-    in.gripClick    = pkt.gripClick;
-    in.aClick       = pkt.aClick;
-    in.bClick       = pkt.bClick;
-    in.triggerValue = pkt.triggerValue;
-    in.joystickX    = pkt.joystickX;
-    in.joystickY    = pkt.joystickY;
-
-    std::lock_guard<std::mutex> lk(m_mutex);
-    if (pkt.device == YunaDeviceType::CtrlLeft) m_leftInput  = in;
-    else                                         m_rightInput = in;
-}
-
-// ---------------------------------------------------------------------------
-// Getters
-// ---------------------------------------------------------------------------
-bool PoseServer::HasHMDPose()             const { std::lock_guard<std::mutex> l(m_mutex); return m_hasHMD;   }
-bool PoseServer::HasLeftControllerPose()  const { std::lock_guard<std::mutex> l(m_mutex); return m_hasLeft;  }
-bool PoseServer::HasRightControllerPose() const { std::lock_guard<std::mutex> l(m_mutex); return m_hasRight; }
-
-vr::DriverPose_t PoseServer::GetHMDPose()             const { std::lock_guard<std::mutex> l(m_mutex); return m_hmdPose;   }
-vr::DriverPose_t PoseServer::GetLeftControllerPose()  const { std::lock_guard<std::mutex> l(m_mutex); return m_leftPose;  }
-vr::DriverPose_t PoseServer::GetRightControllerPose() const { std::lock_guard<std::mutex> l(m_mutex); return m_rightPose; }
-
-ControllerInput  PoseServer::GetLeftInput()  const { std::lock_guard<std::mutex> l(m_mutex); return m_leftInput;  }
-ControllerInput  PoseServer::GetRightInput() const { std::lock_guard<std::mutex> l(m_mutex); return m_rightInput; }

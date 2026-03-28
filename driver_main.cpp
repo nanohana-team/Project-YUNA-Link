@@ -4,6 +4,8 @@
 #include "hmd_device.h"
 #include "controller_device.h"
 #include "pose_server.h"
+#include "input_server.h"
+#include "shared_state.h"
 
 static YunaDriverProvider g_provider;
 
@@ -12,9 +14,7 @@ void* HmdDriverFactory(const char* pInterfaceName, int* pReturnCode)
 {
     if (strcmp(pInterfaceName, vr::IServerTrackedDeviceProvider_Version) == 0)
         return &g_provider;
-
-    if (pReturnCode)
-        *pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
+    if (pReturnCode) *pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
     return nullptr;
 }
 
@@ -23,28 +23,26 @@ vr::EVRInitError YunaDriverProvider::Init(vr::IVRDriverContext* pDriverContext)
     VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
     DriverLog("[YUNA] Driver initializing\n");
 
-    m_poseServer = std::make_unique<PoseServer>();
-    m_poseServer->Start();
+    m_state       = std::make_unique<SharedState>();
+    m_poseServer  = std::make_unique<PoseServer>(m_state.get());
+    m_inputServer = std::make_unique<InputServer>(m_state.get());
 
-    m_hmd = std::make_shared<YunaHMD>(m_poseServer.get());
+    m_poseServer->Start();
+    m_inputServer->Start();
+
+    m_hmd = std::make_shared<YunaHMD>(m_state.get());
     vr::VRServerDriverHost()->TrackedDeviceAdded(
-        m_hmd->GetSerialNumber(),
-        vr::TrackedDeviceClass_HMD,
-        m_hmd.get());
+        m_hmd->GetSerialNumber(), vr::TrackedDeviceClass_HMD, m_hmd.get());
 
     m_ctrlLeft = std::make_shared<YunaController>(
-        vr::TrackedControllerRole_LeftHand, m_poseServer.get());
+        vr::TrackedControllerRole_LeftHand, m_state.get());
     vr::VRServerDriverHost()->TrackedDeviceAdded(
-        m_ctrlLeft->GetSerialNumber(),
-        vr::TrackedDeviceClass_Controller,
-        m_ctrlLeft.get());
+        m_ctrlLeft->GetSerialNumber(), vr::TrackedDeviceClass_Controller, m_ctrlLeft.get());
 
     m_ctrlRight = std::make_shared<YunaController>(
-        vr::TrackedControllerRole_RightHand, m_poseServer.get());
+        vr::TrackedControllerRole_RightHand, m_state.get());
     vr::VRServerDriverHost()->TrackedDeviceAdded(
-        m_ctrlRight->GetSerialNumber(),
-        vr::TrackedDeviceClass_Controller,
-        m_ctrlRight.get());
+        m_ctrlRight->GetSerialNumber(), vr::TrackedDeviceClass_Controller, m_ctrlRight.get());
 
     DriverLog("[YUNA] Driver initialized: HMD + 2 Controllers\n");
     return vr::VRInitError_None;
@@ -53,14 +51,13 @@ vr::EVRInitError YunaDriverProvider::Init(vr::IVRDriverContext* pDriverContext)
 void YunaDriverProvider::Cleanup()
 {
     DriverLog("[YUNA] Driver cleanup\n");
-    if (m_poseServer) m_poseServer->Stop();
+    if (m_inputServer) m_inputServer->Stop();
+    if (m_poseServer)  m_poseServer->Stop();
     VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
 const char* const* YunaDriverProvider::GetInterfaceVersions()
-{
-    return vr::k_InterfaceVersions;
-}
+{ return vr::k_InterfaceVersions; }
 
 void YunaDriverProvider::RunFrame()
 {
