@@ -1,0 +1,10 @@
+torch>=2.2
+transformers>=5.0.0
+accelerate>=0.30
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+orjson
+httpx
+rich
+pywin32

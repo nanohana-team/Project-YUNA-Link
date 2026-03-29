@@ -81,29 +81,31 @@
   <PropertyGroup Label="UserMacros" />
 
   <!--
-    OutDir: each configuration gets its own output folder.
-    SteamVR loads from driver_yuna\bin\win64\ so ONLY Release|x64 goes there.
-    Other configs go to build\ to avoid polluting the install path.
+    Build outputs are kept under build\ so src\ remains source-only.
   -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)src\driver_yuna\bin\win64\</OutDir>
-    <IntDir>$(SolutionDir)build\Release\x64\</IntDir>
+    <OutDir>$(SolutionDir)build\driver_yuna\Release\x64\</OutDir>
+    <IntDir>$(SolutionDir)build\driver_yuna\obj\Release\x64\</IntDir>
     <TargetName>driver_yuna</TargetName>
+    <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)build\Debug\x64\out\</OutDir>
-    <IntDir>$(SolutionDir)build\Debug\x64\</IntDir>
+    <OutDir>$(SolutionDir)build\driver_yuna\Debug\x64\</OutDir>
+    <IntDir>$(SolutionDir)build\driver_yuna\obj\Debug\x64\</IntDir>
     <TargetName>driver_yuna</TargetName>
+    <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>$(SolutionDir)build\Release\Win32\out\</OutDir>
-    <IntDir>$(SolutionDir)build\Release\Win32\</IntDir>
+    <OutDir>$(SolutionDir)build\driver_yuna\Release\Win32\</OutDir>
+    <IntDir>$(SolutionDir)build\driver_yuna\obj\Release\Win32\</IntDir>
     <TargetName>driver_yuna</TargetName>
+    <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <OutDir>$(SolutionDir)build\Debug\Win32\out\</OutDir>
-    <IntDir>$(SolutionDir)build\Debug\Win32\</IntDir>
+    <OutDir>$(SolutionDir)build\driver_yuna\Debug\Win32\</OutDir>
+    <IntDir>$(SolutionDir)build\driver_yuna\obj\Debug\Win32\</IntDir>
     <TargetName>driver_yuna</TargetName>
+    <TargetExt>.dll</TargetExt>
   </PropertyGroup>
 
   <!-- ===== Debug|Win32 ===== -->
@@ -161,7 +163,7 @@
     </Link>
   </ItemDefinitionGroup>
 
-  <!-- ===== Release|x64  (SteamVR install target) ===== -->
+  <!-- ===== Release|x64 ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -180,14 +182,12 @@
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>$(OpenVRLibWin64);ws2_32.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <!-- Copy openvr_api.dll next to driver_yuna.dll after build -->
     <PostBuildEvent>
       <Command>if exist "$(OpenVRDllWin64)" (copy /Y "$(OpenVRDllWin64)" "$(OutDir)openvr_api.dll")</Command>
       <Message>Copying openvr_api.dll to $(OutDir)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
 
-  <!-- Source files -->
   <ItemGroup>
     <ClCompile Include="driver_main.cpp" />
     <ClCompile Include="hmd_device.cpp" />
@@ -197,7 +197,6 @@
     <ClCompile Include="display_window.cpp" />
   </ItemGroup>
 
-  <!-- Header files -->
   <ItemGroup>
     <ClInclude Include="driver_main.h" />
     <ClInclude Include="hmd_device.h" />
@@ -209,7 +208,6 @@
     <ClInclude Include="display_window.h" />
   </ItemGroup>
 
-  <!-- Resource files -->
   <ItemGroup>
     <None Include="..\driver_yuna\driver.vrdrivermanifest" />
     <None Include="..\driver_yuna\resources\input\yuna_controller_profile.json" />
