@@ -8,3 +8,7 @@ orjson
 httpx
 rich
 pywin32
+ultralytics
+opencv-python
+mss
+numpy
