@@ -51,6 +51,7 @@ models/*.pth
 # ---- ログ ----
 logs/*.log
 logs/*.txt
+logs/detect_debug_frames/*.png
 
 # ---- 設定ローカル上書き ----
 config/local_*.yaml
