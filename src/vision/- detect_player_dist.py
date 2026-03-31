@@ -1,15 +1,13 @@
+# src/vision/detect_player_dist.py
 from __future__ import annotations
 
 import argparse
 import ctypes
 import ctypes.wintypes
-import json
-import socketserver
 import sys
-import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -179,14 +177,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="Mean brightness threshold to judge whether PrintWindow is usable",
-    )
-
-    parser.add_argument("--query-host", default="127.0.0.1")
-    parser.add_argument("--query-port", type=int, default=28766)
-    parser.add_argument(
-        "--disable-query-server",
-        action="store_true",
-        help="Disable local query server for player position/distance requests",
     )
 
     return parser.parse_args()
@@ -717,261 +707,6 @@ class TrackState:
     last_disparity_px: Optional[float] = None
 
 
-@dataclass
-class SharedPlayerState:
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    timestamp: float = 0.0
-    available: bool = False
-    track_mode: str = "lost"
-    distance_m: Optional[float] = None
-    distance_raw_m: Optional[float] = None
-    disparity_px: Optional[float] = None
-    category: str = "unknown"
-    screen_x_px: Optional[float] = None
-    screen_y_px: Optional[float] = None
-    screen_x_norm: Optional[float] = None
-    screen_y_norm: Optional[float] = None
-    frame_width: int = 0
-    frame_height: int = 0
-    left_cx_px: Optional[float] = None
-    right_cx_px: Optional[float] = None
-    left_cy_px: Optional[float] = None
-    right_cy_px: Optional[float] = None
-    right_dx_px: Optional[float] = None
-    right_dy_px: Optional[float] = None
-    right_dx_norm: Optional[float] = None
-    right_dy_norm: Optional[float] = None
-
-    def update(
-        self,
-        *,
-        available: bool,
-        track_mode: str,
-        frame_width: int,
-        frame_height: int,
-        distance_m: Optional[float],
-        distance_raw_m: Optional[float],
-        disparity_px: Optional[float],
-        category: str,
-        screen_x_px: Optional[float],
-        screen_y_px: Optional[float],
-        screen_x_norm: Optional[float],
-        screen_y_norm: Optional[float],
-        left_cx_px: Optional[float],
-        right_cx_px: Optional[float],
-        left_cy_px: Optional[float],
-        right_cy_px: Optional[float],
-        right_dx_px: Optional[float],
-        right_dy_px: Optional[float],
-        right_dx_norm: Optional[float],
-        right_dy_norm: Optional[float],
-    ) -> None:
-        with self.lock:
-            self.timestamp = time.time()
-            self.available = available
-            self.track_mode = track_mode
-            self.frame_width = int(frame_width)
-            self.frame_height = int(frame_height)
-            self.distance_m = distance_m
-            self.distance_raw_m = distance_raw_m
-            self.disparity_px = disparity_px
-            self.category = category
-            self.screen_x_px = screen_x_px
-            self.screen_y_px = screen_y_px
-            self.screen_x_norm = screen_x_norm
-            self.screen_y_norm = screen_y_norm
-            self.left_cx_px = left_cx_px
-            self.right_cx_px = right_cx_px
-            self.left_cy_px = left_cy_px
-            self.right_cy_px = right_cy_px
-            self.right_dx_px = right_dx_px
-            self.right_dy_px = right_dy_px
-            self.right_dx_norm = right_dx_norm
-            self.right_dy_norm = right_dy_norm
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            return {
-                "timestamp": self.timestamp,
-                "available": self.available,
-                "track_mode": self.track_mode,
-                "distance_m": self.distance_m,
-                "distance_raw_m": self.distance_raw_m,
-                "disparity_px": self.disparity_px,
-                "category": self.category,
-                "screen_x_px": self.screen_x_px,
-                "screen_y_px": self.screen_y_px,
-                "screen_x_norm": self.screen_x_norm,
-                "screen_y_norm": self.screen_y_norm,
-                "frame_width": self.frame_width,
-                "frame_height": self.frame_height,
-                "left_cx_px": self.left_cx_px,
-                "right_cx_px": self.right_cx_px,
-                "left_cy_px": self.left_cy_px,
-                "right_cy_px": self.right_cy_px,
-                "right_dx_px": self.right_dx_px,
-                "right_dy_px": self.right_dy_px,
-                "right_dx_norm": self.right_dx_norm,
-                "right_dy_norm": self.right_dy_norm,
-            }
-
-
-class PlayerQueryTCPServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self, server_address, handler_cls, shared_state: SharedPlayerState):
-        super().__init__(server_address, handler_cls)
-        self.shared_state = shared_state
-
-
-class PlayerQueryHandler(socketserver.StreamRequestHandler):
-    def handle(self):
-        while True:
-            line = self.rfile.readline()
-            if not line:
-                return
-
-            cmd = line.decode("utf-8", errors="ignore").strip().upper()
-            snap = self.server.shared_state.snapshot()
-
-            if cmd == "PING":
-                payload = {"ok": True, "reply": "PONG"}
-
-            elif cmd == "GET PLAYER_POS":
-                payload = {
-                    "ok": bool(snap["available"]),
-                    "timestamp": snap["timestamp"],
-                    "track_mode": snap["track_mode"],
-                    "screen": {
-                        "x_px": snap["screen_x_px"],
-                        "y_px": snap["screen_y_px"],
-                        "x_norm": snap["screen_x_norm"],
-                        "y_norm": snap["screen_y_norm"],
-                        "frame_width": snap["frame_width"],
-                        "frame_height": snap["frame_height"],
-                    },
-                    "right_offset": {
-                        "dx_px": snap["right_dx_px"],
-                        "dy_px": snap["right_dy_px"],
-                        "dx_norm": snap["right_dx_norm"],
-                        "dy_norm": snap["right_dy_norm"],
-                    },
-                }
-
-            elif cmd == "GET PLAYER_DIST":
-                payload = {
-                    "ok": bool(snap["available"]) and (snap["distance_m"] is not None),
-                    "timestamp": snap["timestamp"],
-                    "track_mode": snap["track_mode"],
-                    "distance_m": snap["distance_m"],
-                    "distance_raw_m": snap["distance_raw_m"],
-                    "disparity_px": snap["disparity_px"],
-                    "category": snap["category"],
-                }
-
-            elif cmd == "GET PLAYER_INFO":
-                payload = {
-                    "ok": bool(snap["available"]),
-                    "timestamp": snap["timestamp"],
-                    "track_mode": snap["track_mode"],
-                    "screen": {
-                        "x_px": snap["screen_x_px"],
-                        "y_px": snap["screen_y_px"],
-                        "x_norm": snap["screen_x_norm"],
-                        "y_norm": snap["screen_y_norm"],
-                        "frame_width": snap["frame_width"],
-                        "frame_height": snap["frame_height"],
-                    },
-                    "right_offset": {
-                        "dx_px": snap["right_dx_px"],
-                        "dy_px": snap["right_dy_px"],
-                        "dx_norm": snap["right_dx_norm"],
-                        "dy_norm": snap["right_dy_norm"],
-                    },
-                    "distance_m": snap["distance_m"],
-                    "distance_raw_m": snap["distance_raw_m"],
-                    "disparity_px": snap["disparity_px"],
-                    "category": snap["category"],
-                }
-
-            else:
-                payload = {
-                    "ok": False,
-                    "error": "unknown_command",
-                    "supported": ["PING", "GET PLAYER_POS", "GET PLAYER_DIST", "GET PLAYER_INFO"],
-                }
-
-            self.wfile.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-
-
-def start_query_server(host: str, port: int, shared_state: SharedPlayerState):
-    server = PlayerQueryTCPServer((host, port), PlayerQueryHandler, shared_state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
-def compute_player_screen_position(
-    left_box,
-    right_box,
-    frame_width: int,
-    frame_height: int,
-):
-    if left_box is None or right_box is None:
-        return None
-
-    half_width = frame_width * 0.5
-    lcx, lcy = box_center(left_box)
-    rcx, rcy = box_center(right_box)
-
-    # 全体の左半分(左目)基準の screen 座標
-    screen_x_px = (float(lcx) + float(rcx)) * 0.5
-    screen_y_px = (float(lcy) + float(rcy)) * 0.5
-
-    x_norm = 0.0
-    y_norm = 0.0
-    if half_width > 1e-6:
-        x_norm = (screen_x_px - (half_width * 0.5)) / (half_width * 0.5)
-    if frame_height > 1e-6:
-        y_norm = (screen_y_px - (frame_height * 0.5)) / (frame_height * 0.5)
-
-    x_norm = float(np.clip(x_norm, -1.0, 1.0))
-    y_norm = float(np.clip(y_norm, -1.0, 1.0))
-
-    # 右目ローカル座標系での中央差分
-    right_center_x = half_width * 0.5
-    right_center_y = frame_height * 0.5
-
-    right_dx_px = float(rcx - right_center_x)
-    right_dy_px = float(rcy - right_center_y)
-
-    right_dx_norm = 0.0
-    right_dy_norm = 0.0
-    if right_center_x > 1e-6:
-        right_dx_norm = right_dx_px / right_center_x
-    if right_center_y > 1e-6:
-        right_dy_norm = right_dy_px / right_center_y
-
-    right_dx_norm = float(np.clip(right_dx_norm, -1.0, 1.0))
-    right_dy_norm = float(np.clip(right_dy_norm, -1.0, 1.0))
-
-    return {
-        "screen_x_px": screen_x_px,
-        "screen_y_px": screen_y_px,
-        "screen_x_norm": x_norm,
-        "screen_y_norm": y_norm,
-        "left_cx_px": float(lcx),
-        "right_cx_px": float(rcx),
-        "left_cy_px": float(lcy),
-        "right_cy_px": float(rcy),
-        "right_dx_px": right_dx_px,
-        "right_dy_px": right_dy_px,
-        "right_dx_norm": right_dx_norm,
-        "right_dy_norm": right_dy_norm,
-    }
-
-
 def iou_xyxy(box_a, box_b) -> float:
     ax1, ay1, ax2, ay2 = box_a
     bx1, by1, bx2, by2 = box_b
@@ -1213,20 +948,6 @@ def main() -> int:
     track = TrackState()
     track_mode = "lost"
     max_track_miss = args.max_track_miss
-
-    shared_state = SharedPlayerState()
-    query_server = None
-    query_thread = None
-    if not args.disable_query_server:
-        try:
-            query_server, query_thread = start_query_server(
-                args.query_host,
-                args.query_port,
-                shared_state,
-            )
-            log(f"[INFO ] query server listening on {args.query_host}:{args.query_port}")
-        except Exception as exc:
-            log(f"[WARN ] query server start failed: {exc!r}")
 
     printwindow_state = None
     printwindow_tested_hwnd = None
@@ -1470,7 +1191,7 @@ def main() -> int:
                         image_width_px=left_w,
                         h_fov_deg=args.h_fov_deg,
                         baseline_m=args.baseline_m,
-                        min_disparity_px=args.min_disparity_px,
+                        min_disparity_px=args.min_disparity_pxx if hasattr(args, "min_disparity_pxx") else args.min_disparity_px,
                     )
 
                 disparity_px = result["disparity_px"]
@@ -1495,38 +1216,6 @@ def main() -> int:
                 )
             else:
                 log(f"[TRACE] track_mode={track_mode} miss_count={track.miss_count}")
-
-            player_pos = None
-            if track_ok and track.left_box is not None and track.right_box is not None:
-                player_pos = compute_player_screen_position(
-                    track.left_box,
-                    track.right_box,
-                    frame.shape[1],
-                    frame.shape[0],
-                )
-
-            shared_state.update(
-                available=bool(track_ok and player_pos is not None),
-                track_mode=track_mode,
-                frame_width=left_w,
-                frame_height=frame.shape[0],
-                distance_m=ema_distance if (track_ok and player_pos is not None) else None,
-                distance_raw_m=raw_distance_m if (track_ok and player_pos is not None) else None,
-                disparity_px=disparity_px if (track_ok and player_pos is not None) else None,
-                category=category if (track_ok and player_pos is not None) else "unknown",
-                screen_x_px=player_pos["screen_x_px"] if player_pos is not None else None,
-                screen_y_px=player_pos["screen_y_px"] if player_pos is not None else None,
-                screen_x_norm=player_pos["screen_x_norm"] if player_pos is not None else None,
-                screen_y_norm=player_pos["screen_y_norm"] if player_pos is not None else None,
-                left_cx_px=player_pos["left_cx_px"] if player_pos is not None else None,
-                right_cx_px=player_pos["right_cx_px"] if player_pos is not None else None,
-                left_cy_px=player_pos["left_cy_px"] if player_pos is not None else None,
-                right_cy_px=player_pos["right_cy_px"] if player_pos is not None else None,
-                right_dx_px=player_pos["right_dx_px"] if player_pos is not None else None,
-                right_dy_px=player_pos["right_dy_px"] if player_pos is not None else None,
-                right_dx_norm=player_pos["right_dx_norm"] if player_pos is not None else None,
-                right_dy_norm=player_pos["right_dy_norm"] if player_pos is not None else None,
-            )
 
             with StepTimer("hstack", args.slow_ms):
                 combined = np.hstack([vis_left, vis_right])
@@ -1608,59 +1297,6 @@ def main() -> int:
                     cv2.LINE_AA,
                 )
 
-                if player_pos is not None:
-                    cv2.putText(
-                        combined,
-                        f"PlayerXY: ({player_pos['screen_x_px']:.1f}, {player_pos['screen_y_px']:.1f}) px",
-                        (20, y_base + 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        combined,
-                        f"PlayerNorm: ({player_pos['screen_x_norm']:+.3f}, {player_pos['screen_y_norm']:+.3f})",
-                        (20, y_base + 90),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        combined,
-                        f"RightOffsetPx: ({player_pos['right_dx_px']:+.1f}, {player_pos['right_dy_px']:+.1f})",
-                        (20, y_base + 120),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 180, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        combined,
-                        f"RightOffsetNorm: ({player_pos['right_dx_norm']:+.3f}, {player_pos['right_dy_norm']:+.3f})",
-                        (20, y_base + 150),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 180, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                else:
-                    cv2.putText(
-                        combined,
-                        "PlayerXY: N/A",
-                        (20, y_base + 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-
             with StepTimer("imshow", args.slow_ms):
                 cv2.imshow(args.title, combined)
 
@@ -1687,15 +1323,6 @@ def main() -> int:
 
     cv2.destroyAllWindows()
     log("[INFO ] cv2.destroyAllWindows done")
-
-    try:
-        if query_server is not None:
-            query_server.shutdown()
-            query_server.server_close()
-            log("[INFO ] query server shutdown done")
-    except Exception:
-        log("[WARN ] query server shutdown failed")
-        log(traceback.format_exc())
 
     if _LOG_FILE_HANDLE is not None:
         _LOG_FILE_HANDLE.close()
