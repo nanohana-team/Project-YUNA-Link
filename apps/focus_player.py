@@ -136,8 +136,6 @@ class FocusController:
         a = _clamp(self.yaw_smooth, 0.0, 1.0)
         self.current_yaw_deg += (target - self.current_yaw_deg) * a
 
-        if abs(self.current_yaw_deg) < 0.03:
-            self.current_yaw_deg = 0.0
 
         return self.current_yaw_deg, use_sound
 
@@ -170,10 +168,12 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
     
-last_send_time = 0.0
-keepalive_sec = 0.20
 
 def main() -> int:
+
+    last_send_time = 0.0
+    keepalive_sec = 0.20
+
     global RUNNING
 
     args = build_argparser().parse_args()
