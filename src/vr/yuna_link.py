@@ -5,21 +5,17 @@ Project YUNA Link - Unified Python Client
 YunaLink        -- FramePacket + HMD sender  (\\.\pipe\YunaLinkPose)
 YunaInputClient -- Text command sender       (\\.\pipe\YunaLinkInput)
 
-Added:
-  Local control server for idle mode
-  - default host: 127.0.0.1
-  - default port: 28765
+Idle mode:
+  - keeps controller pose alive
+  - does NOT send HMD pose
+  - maintains input state internally
+  - local control server updates that input state
 
 Usage:
   python src/vr/yuna_link.py --mode idle
   python src/vr/yuna_link.py --mode input
   python src/vr/yuna_link.py --cmd "TAP A"
-
-  # idle mode with local control server
-  python src/vr/yuna_link.py --mode idle --control-port 28765
-
-  # send a command to an already running idle process
-  python src/vr/yuna_link.py --remote-cmd "TAP START"
+  python src/vr/yuna_link.py --remote-cmd "SET R_STICK 0.6 0"
 """
 
 import argparse
@@ -130,6 +126,11 @@ def clamp(v, lo=-1.0, hi=1.0):
 
 def clamp01(v):
     return max(0.0, min(1.0, v))
+
+
+def parse_bool_token(token: str) -> bool:
+    t = token.strip().lower()
+    return t in ("1", "true", "on", "yes")
 
 
 # =============================================================================
@@ -246,6 +247,7 @@ class YunaLink:
 class YunaInputClient:
     """
     Send text commands to the InputServer.
+    Mainly used for one-shot commands / REPL / compatibility.
     """
 
     def __init__(self):
@@ -274,7 +276,6 @@ class YunaInputClient:
         with self._lock:
             _pipe_write(self._handle, data)
 
-    # Boolean buttons
     def set_start(self, v: bool):
         self.send(f"SET START {1 if v else 0}")
 
@@ -293,7 +294,6 @@ class YunaInputClient:
     def set_y(self, v: bool):
         self.send(f"SET Y {1 if v else 0}")
 
-    # Analog (0~1)
     def set_rtrigger(self, v: float):
         self.send(f"SET RTRIGGER {v:.4f}")
 
@@ -306,18 +306,15 @@ class YunaInputClient:
     def set_lgrip(self, v: float):
         self.send(f"SET LGRIP {v:.4f}")
 
-    # Sticks (-1~1)
     def set_left_stick(self, x: float, y: float):
         self.send(f"SET L_STICK {x:.4f} {y:.4f}")
 
     def set_right_stick(self, x: float, y: float):
         self.send(f"SET R_STICK {x:.4f} {y:.4f}")
 
-    # Reset
     def reset(self):
         self.send("RESET_INPUT")
 
-    # Taps
     def tap_a(self):
         self.send("TAP A")
 
@@ -336,7 +333,6 @@ class YunaInputClient:
     def tap_menu(self):
         self.send("TAP MENU")
 
-    # Pose commands
     def move(self, target: str, axis: str, delta: float):
         self.send(f"MOVE {target} {axis} {delta:.6f}")
 
@@ -354,20 +350,79 @@ class YunaInputClient:
 
 
 # =============================================================================
+# Idle input state
+# =============================================================================
+
+def make_idle_state() -> dict:
+    return {
+        "tap_start_frames": 0,
+        "tap_menu_frames": 0,
+
+        "start_button": False,
+        "menu_button": False,
+
+        "left_input": {
+            "a_button": False,
+            "b_button": False,
+            "x_button": False,
+            "y_button": False,
+            "trigger": 0.0,
+            "grip": 0.0,
+            "stick_x": 0.0,
+            "stick_y": 0.0,
+        },
+        "right_input": {
+            "a_button": False,
+            "b_button": False,
+            "x_button": False,
+            "y_button": False,
+            "trigger": 0.0,
+            "grip": 0.0,
+            "stick_x": 0.0,
+            "stick_y": 0.0,
+        },
+    }
+
+
+def reset_idle_inputs(state: dict):
+    state["tap_start_frames"] = 0
+    state["tap_menu_frames"] = 0
+    state["start_button"] = False
+    state["menu_button"] = False
+
+    for side in ("left_input", "right_input"):
+        state[side]["a_button"] = False
+        state[side]["b_button"] = False
+        state[side]["x_button"] = False
+        state[side]["y_button"] = False
+        state[side]["trigger"] = 0.0
+        state[side]["grip"] = 0.0
+        state[side]["stick_x"] = 0.0
+        state[side]["stick_y"] = 0.0
+
+
+# =============================================================================
 # Local control server
 # =============================================================================
 
 class LocalControlServer:
     """
-    Receive commands from another local process and forward them to YunaLinkInput.
+    Receive commands from another local process and update idle input state.
 
     Protocol:
       TCP text lines on 127.0.0.1:<port>
 
-    Special commands:
-      quit / exit / shutdown   -> stop idle loop
-      ping                     -> reply PONG
-      TAP START / TAP MENU     -> queued into idle frame sender
+    Supported:
+      ping
+      quit / exit / shutdown
+      TAP A|B|X|Y|START|MENU
+      SET START|MENU|A|B|X|Y 0|1
+      SET RTRIGGER|RGRIP|LTRIGGER|LGRIP <f>
+      SET L_STICK <x> <y>
+      SET R_STICK <x> <y>
+
+    Other commands are forwarded to YunaLinkInput for compatibility
+    (pose commands, etc.).
     """
 
     def __init__(
@@ -429,6 +484,102 @@ class LocalControlServer:
                 daemon=True,
             ).start()
 
+    def _reply_ok(self, conn: socket.socket):
+        try:
+            conn.sendall(b"OK\n")
+        except OSError:
+            pass
+
+    def _reply_err(self, conn: socket.socket, msg: str):
+        try:
+            conn.sendall((f"ERR {msg}\n").encode("utf-8", errors="replace"))
+        except OSError:
+            pass
+
+    def _handle_tap(self, button: str):
+        b = button.upper()
+        with self.state_lock:
+            if b == "START":
+                self.command_state["tap_start_frames"] = max(self.command_state["tap_start_frames"], 8)
+            elif b == "MENU":
+                self.command_state["tap_menu_frames"] = max(self.command_state["tap_menu_frames"], 8)
+            elif b == "A":
+                self.command_state["right_input"]["a_button"] = True
+                self.command_state["right_input"]["_tap_a_until"] = time.monotonic() + (8 / 60.0)
+            elif b == "B":
+                self.command_state["right_input"]["b_button"] = True
+                self.command_state["right_input"]["_tap_b_until"] = time.monotonic() + (8 / 60.0)
+            elif b == "X":
+                self.command_state["left_input"]["x_button"] = True
+                self.command_state["left_input"]["_tap_x_until"] = time.monotonic() + (8 / 60.0)
+            elif b == "Y":
+                self.command_state["left_input"]["y_button"] = True
+                self.command_state["left_input"]["_tap_y_until"] = time.monotonic() + (8 / 60.0)
+            else:
+                raise ValueError(f"unknown tap button: {button}")
+
+    def _handle_set_command(self, parts: list[str]) -> bool:
+        if len(parts) < 3:
+            return False
+
+        if parts[0].upper() != "SET":
+            return False
+
+        target = parts[1].upper()
+
+        with self.state_lock:
+            if target == "START":
+                self.command_state["start_button"] = parse_bool_token(parts[2])
+                return True
+
+            if target == "MENU":
+                self.command_state["menu_button"] = parse_bool_token(parts[2])
+                return True
+
+            if target == "L_STICK" and len(parts) >= 4:
+                self.command_state["left_input"]["stick_x"] = clamp(float(parts[2]))
+                self.command_state["left_input"]["stick_y"] = clamp(float(parts[3]))
+                return True
+
+            if target == "R_STICK" and len(parts) >= 4:
+                self.command_state["right_input"]["stick_x"] = clamp(float(parts[2]))
+                self.command_state["right_input"]["stick_y"] = clamp(float(parts[3]))
+                return True
+
+            if target == "LTRIGGER":
+                self.command_state["left_input"]["trigger"] = clamp01(float(parts[2]))
+                return True
+
+            if target == "LGRIP":
+                self.command_state["left_input"]["grip"] = clamp01(float(parts[2]))
+                return True
+
+            if target == "RTRIGGER":
+                self.command_state["right_input"]["trigger"] = clamp01(float(parts[2]))
+                return True
+
+            if target == "RGRIP":
+                self.command_state["right_input"]["grip"] = clamp01(float(parts[2]))
+                return True
+
+            if target == "A":
+                self.command_state["right_input"]["a_button"] = parse_bool_token(parts[2])
+                return True
+
+            if target == "B":
+                self.command_state["right_input"]["b_button"] = parse_bool_token(parts[2])
+                return True
+
+            if target == "X":
+                self.command_state["left_input"]["x_button"] = parse_bool_token(parts[2])
+                return True
+
+            if target == "Y":
+                self.command_state["left_input"]["y_button"] = parse_bool_token(parts[2])
+                return True
+
+        return False
+
     def _handle_client(self, conn: socket.socket, addr):
         peer = f"{addr[0]}:{addr[1]}"
         try:
@@ -446,10 +597,7 @@ class LocalControlServer:
 
                     if lower in ("quit", "exit", "shutdown"):
                         self.stop_event.set()
-                        try:
-                            conn.sendall(b"OK shutdown\n")
-                        except OSError:
-                            pass
+                        self._reply_ok(conn)
                         print("[LOCAL CTRL] shutdown requested")
                         return
 
@@ -460,50 +608,46 @@ class LocalControlServer:
                             pass
                         continue
 
-                    if lower == "tap start":
+                    if lower == "reset_input":
                         with self.state_lock:
-                            self.command_state["tap_start_frames"] = max(
-                                self.command_state["tap_start_frames"], 8
-                            )
-                        try:
-                            conn.sendall(b"OK\n")
-                        except OSError:
-                            pass
-                        print("[LOCAL CTRL] queued TAP START")
+                            reset_idle_inputs(self.command_state)
+                        self._reply_ok(conn)
+                        print("[LOCAL CTRL] idle input state reset")
                         continue
 
-                    if lower == "tap menu":
-                        with self.state_lock:
-                            self.command_state["tap_menu_frames"] = max(
-                                self.command_state["tap_menu_frames"], 8
-                            )
+                    parts = line.split()
+
+                    if len(parts) == 2 and parts[0].upper() == "TAP":
                         try:
-                            conn.sendall(b"OK\n")
-                        except OSError:
-                            pass
-                        print("[LOCAL CTRL] queued TAP MENU")
+                            self._handle_tap(parts[1])
+                            self._reply_ok(conn)
+                            print(f"[LOCAL CTRL] queued TAP {parts[1].upper()}")
+                        except Exception as e:
+                            self._reply_err(conn, str(e))
+                        continue
+
+                    try:
+                        if self._handle_set_command(parts):
+                            self._reply_ok(conn)
+                            print(f"[LOCAL CTRL] state updated: {line}")
+                            continue
+                    except Exception as e:
+                        self._reply_err(conn, str(e))
                         continue
 
                     try:
                         with YunaInputClient() as inp:
                             inp.send(line)
-                        try:
-                            conn.sendall(b"OK\n")
-                        except OSError:
-                            # クライアントが返信待たずに閉じても致命扱いしない
-                            pass
+                        self._reply_ok(conn)
                         print(f"[LOCAL CTRL] forwarded: {line}")
                     except Exception as e:
-                        msg = f"ERR {e}\n"
-                        try:
-                            conn.sendall(msg.encode("utf-8", errors="replace"))
-                        except Exception:
-                            pass
+                        self._reply_err(conn, str(e))
                         print(f"[LOCAL CTRL] forward failed: {e}")
                         return
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             print(f"[LOCAL CTRL] client disconnected ({peer}): {e}")
+
 
 def send_remote_command(
     command: str,
@@ -533,10 +677,7 @@ def mode_idle(control_host: str, control_port: int):
     print("[YUNA] HMD pose is NOT sent in idle mode. Head pose is left to input commands / external controllers.")
     stop_event = threading.Event()
 
-    command_state = {
-        "tap_start_frames": 0,
-        "tap_menu_frames": 0,
-    }
+    command_state = make_idle_state()
     state_lock = threading.Lock()
 
     ctrl = LocalControlServer(
@@ -551,32 +692,87 @@ def mode_idle(control_host: str, control_port: int):
     with YunaLink() as yl:
         t = 0.0
         dt = 1.0 / 60.0
+        last_debug_print = 0.0
+
         try:
             while not stop_event.is_set():
                 breath = math.sin(t * 0.4) * 0.004
+                now_mono = time.monotonic()
 
                 with state_lock:
-                    start_pressed = command_state["tap_start_frames"] > 0
-                    menu_pressed = command_state["tap_menu_frames"] > 0
+                    start_pressed = command_state["start_button"] or (command_state["tap_start_frames"] > 0)
+                    menu_pressed = command_state["menu_button"] or (command_state["tap_menu_frames"] > 0)
 
                     if command_state["tap_start_frames"] > 0:
                         command_state["tap_start_frames"] -= 1
                     if command_state["tap_menu_frames"] > 0:
                         command_state["tap_menu_frames"] -= 1
 
-                # NOTE:
-                # Do NOT send HMD pose here.
-                # Sending yl.send_hmd(...) every frame forces the HMD back to a fixed
-                # forward-facing pose and conflicts with external head control such as:
-                #   SET HEAD rX / rY / rZ
-                #
-                # We only keep controller pose + input alive in idle mode.
+                    # one-shot taps for ABXY
+                    li = command_state["left_input"]
+                    ri = command_state["right_input"]
+
+                    if ri.get("_tap_a_until", 0.0) <= now_mono:
+                        ri.pop("_tap_a_until", None)
+                        if "a_button" in ri and not ri.get("_hold_a", False):
+                            ri["a_button"] = ri["a_button"] and False
+
+                    if ri.get("_tap_b_until", 0.0) <= now_mono:
+                        ri.pop("_tap_b_until", None)
+                        if "b_button" in ri and not ri.get("_hold_b", False):
+                            ri["b_button"] = ri["b_button"] and False
+
+                    if li.get("_tap_x_until", 0.0) <= now_mono:
+                        li.pop("_tap_x_until", None)
+                        if "x_button" in li and not li.get("_hold_x", False):
+                            li["x_button"] = li["x_button"] and False
+
+                    if li.get("_tap_y_until", 0.0) <= now_mono:
+                        li.pop("_tap_y_until", None)
+                        if "y_button" in li and not li.get("_hold_y", False):
+                            li["y_button"] = li["y_button"] and False
+
+                    left_input = {
+                        "a_button": bool(li.get("a_button", False)),
+                        "b_button": bool(li.get("b_button", False)),
+                        "x_button": bool(li.get("x_button", False)),
+                        "y_button": bool(li.get("y_button", False)),
+                        "trigger": clamp01(li.get("trigger", 0.0)),
+                        "grip": clamp01(li.get("grip", 0.0)),
+                        "stick_x": clamp(li.get("stick_x", 0.0)),
+                        "stick_y": clamp(li.get("stick_y", 0.0)),
+                    }
+                    right_input = {
+                        "a_button": bool(ri.get("a_button", False)),
+                        "b_button": bool(ri.get("b_button", False)),
+                        "x_button": bool(ri.get("x_button", False)),
+                        "y_button": bool(ri.get("y_button", False)),
+                        "trigger": clamp01(ri.get("trigger", 0.0)),
+                        "grip": clamp01(ri.get("grip", 0.0)),
+                        "stick_x": clamp(ri.get("stick_x", 0.0)),
+                        "stick_y": clamp(ri.get("stick_y", 0.0)),
+                    }
+
                 yl.send_frame(
                     left_pos=(-0.25, 1.1 + breath * 0.5, -0.1),
                     right_pos=(0.25, 1.1 + breath * 0.5, -0.1),
+                    left_input=left_input,
+                    right_input=right_input,
                     start_button=start_pressed,
                     menu_button=menu_pressed,
                 )
+
+                now = time.time()
+                if now - last_debug_print >= 1.0:
+                    last_debug_print = now
+                    print(
+                        "[YUNA][IDLE] "
+                        f"L=({left_input['stick_x']:+.3f},{left_input['stick_y']:+.3f}) "
+                        f"R=({right_input['stick_x']:+.3f},{right_input['stick_y']:+.3f}) "
+                        f"LT={left_input['trigger']:.2f} RT={right_input['trigger']:.2f} "
+                        f"START={1 if start_pressed else 0} MENU={1 if menu_pressed else 0}",
+                        flush=True,
+                    )
 
                 t += dt
                 time.sleep(dt)

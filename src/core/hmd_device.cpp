@@ -98,7 +98,12 @@ void YunaHMD::RunFrame()
 
 // IVRDisplayComponent
 void YunaHMD::GetWindowBounds(int32_t* x, int32_t* y, uint32_t* w, uint32_t* h)
-{ *x=0; *y=0; *w=EYE_W*2; *h=EYE_H; }
+{
+    *x = 0;
+    *y = 0;
+    *w = EYE_W;
+    *h = EYE_H;
+}
 
 bool YunaHMD::IsDisplayOnDesktop()   { return false; }
 bool YunaHMD::IsDisplayRealDisplay() { return false; }
@@ -106,9 +111,14 @@ bool YunaHMD::IsDisplayRealDisplay() { return false; }
 void YunaHMD::GetRecommendedRenderTargetSize(uint32_t* w, uint32_t* h)
 { *w=EYE_W; *h=EYE_H; }
 
-void YunaHMD::GetEyeOutputViewport(vr::EVREye eye,
+void YunaHMD::GetEyeOutputViewport(vr::EVREye,
     uint32_t* x, uint32_t* y, uint32_t* w, uint32_t* h)
-{ *y=0; *w=EYE_W; *h=EYE_H; *x=(eye==vr::Eye_Left)?0:EYE_W; }
+{
+    *x = 0;
+    *y = 0;
+    *w = EYE_W;
+    *h = EYE_H;
+}
 
 void YunaHMD::GetProjectionRaw(vr::EVREye, float* l, float* r, float* t, float* b)
 { *l=-1.f; *r=1.f; *t=-1.f; *b=1.f; }

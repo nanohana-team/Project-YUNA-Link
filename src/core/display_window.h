@@ -41,8 +41,8 @@ private:
     template<class T> static void SR(T*& p)
     { if (p) { p->Release(); p = nullptr; } }
 
-    uint32_t m_eyeW = 1920;
-    uint32_t m_eyeH = 1920;
+    uint32_t m_eyeW = 3840;
+    uint32_t m_eyeH = 3840;
 
     std::thread       m_thread;
     std::atomic<bool> m_running{ false };

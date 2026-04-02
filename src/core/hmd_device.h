@@ -42,8 +42,8 @@ public:
     void        RunFrame();
     const char* GetSerialNumber() const { return "YUNA_HMD_001"; }
 
-    static constexpr uint32_t EYE_W = 1920;
-    static constexpr uint32_t EYE_H = 1920;
+    static constexpr uint32_t EYE_W = 3840;
+    static constexpr uint32_t EYE_H = 3840;
 
 private:
     uint32_t     m_deviceId = vr::k_unTrackedDeviceIndexInvalid;

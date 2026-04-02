@@ -1,13 +1,19 @@
 // Project YUNA Link - display_window.cpp
 // Libs: d3d11.lib dxgi.lib d3dcompiler.lib  (linked via vcxproj)
+//
+// HMD driver remains full stereo (both eyes).
+// This window shows RIGHT EYE ONLY for capture/YOLO use.
+// The compositor delivers a side-by-side texture (3840x1920).
+// We sample only the right half (U: 0.5~1.0).
 
 #include "driver_main.h"
 #include "display_window.h"
 #include <cstring>
 #include <cstdio>
+#include <dxgi1_2.h>  // IDXGIKeyedMutex
 
 // ---------------------------------------------------------------------------
-// HLSL: full-screen blit quad
+// HLSL: simple full-texture blit (UV crop is done via CopySubresourceRegion)
 // ---------------------------------------------------------------------------
 static const char kVS[] = R"(
 struct V { float2 p:POSITION; float2 t:TEXCOORD; };
@@ -76,13 +82,14 @@ void DisplayWindow::WindowThread()
         return;
     }
 
-    RECT rc{0,0,1920,1080};
+    RECT rc{ 0,0,720,720 };
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+
     m_hWnd = CreateWindowExA(0, cls, "YUNA Link - VR View",
-        WS_OVERLAPPEDWINDOW|WS_VISIBLE,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        rc.right-rc.left, rc.bottom-rc.top,
-        nullptr,nullptr,GetModuleHandleA(nullptr),nullptr);
+        rc.right - rc.left, rc.bottom - rc.top,
+        nullptr, nullptr, GetModuleHandleA(nullptr), nullptr);
 
     if (!m_hWnd || !InitD3D(m_hWnd))
     {
@@ -97,7 +104,7 @@ void DisplayWindow::WindowThread()
     ShowWindow(m_hWnd, SW_SHOW);
 
     m_d3dReady = true;
-    DriverLog("[YUNA Display] Window ready %ux%u per eye\n", m_eyeW, m_eyeH);
+    DriverLog("[YUNA Display] Window ready %ux%u (right eye only)\n", m_eyeW, m_eyeH);
 
     MSG msg{};
     while (m_running)
@@ -131,7 +138,7 @@ bool DisplayWindow::InitD3D(HWND hWnd)
 {
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount=2;
-    sd.BufferDesc.Width=1920; sd.BufferDesc.Height=1080;
+    sd.BufferDesc.Width=m_eyeW; sd.BufferDesc.Height=m_eyeH;  // right eye only
     sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate={90,1};
     sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -179,19 +186,15 @@ bool DisplayWindow::InitD3D(HWND hWnd)
     D3D11_SUBRESOURCE_DATA idata{kQuad};
     m_dev->CreateBuffer(&bd,&idata,&m_vb);
 
+
     D3D11_SAMPLER_DESC smpd{};
     smpd.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     smpd.AddressU=smpd.AddressV=smpd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
     m_dev->CreateSamplerState(&smpd,&m_sampler);
 
     D3D11_VIEWPORT vp{};
-    vp.TopLeftX = 0.0f;
-    vp.TopLeftY = 0.0f;
-    vp.Width    = 1920.0f;
-    vp.Height   = 1080.0f;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    m_ctx->RSSetViewports(1, &vp);
+    vp.Width=(float)(m_eyeW); vp.Height=(float)m_eyeH; vp.MaxDepth=1.f;  // right eye only
+    m_ctx->RSSetViewports(1,&vp);
 
     return true;
 }
@@ -221,72 +224,148 @@ void DisplayWindow::Present(uint64_t sharedHandle)
 // ---------------------------------------------------------------------------
 void DisplayWindow::BlitShared(HANDLE hShared)
 {
+    // Open the compositor's texture on our device via the DXGI shared handle
     ID3D11Texture2D* sharedTex = nullptr;
     HRESULT hr = m_dev->OpenSharedResource(
         hShared, __uuidof(ID3D11Texture2D), (void**)&sharedTex);
-    if (FAILED(hr) || !sharedTex) return;
-
-    IDXGIKeyedMutex* keyedMutex = nullptr;
-    hr = sharedTex->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&keyedMutex);
-    if (SUCCEEDED(hr) && keyedMutex)
+    if (FAILED(hr))
     {
-        hr = keyedMutex->AcquireSync(0, 10);
-        if (hr != S_OK)
+        static bool s_logged = false;
+        if (!s_logged)
         {
-            keyedMutex->Release();
+            DriverLog("[YUNA Display] OpenSharedResource failed 0x%08X"
+                      " handle=%p\n", (unsigned)hr, hShared);
+            s_logged = true;
+        }
+        return;
+    }
+
+    // Log texture size (first time only, but stores it for UV decision)
+    static uint32_t s_texW = 0, s_texH = 0;
+    {
+        D3D11_TEXTURE2D_DESC tmp{}; sharedTex->GetDesc(&tmp);
+        if (s_texW != tmp.Width || s_texH != tmp.Height)
+        {
+            s_texW = tmp.Width; s_texH = tmp.Height;
+            DriverLog("[YUNA Display] Texture size changed: %ux%u fmt=%u eyeW=%u\n",
+                      s_texW, s_texH, (unsigned)tmp.Format, m_eyeW);
+            DriverLog("[YUNA Display] -> %s\n",
+                      s_texW >= m_eyeW*2 ? "side-by-side: will crop right half"
+                                         : "single eye: full blit");
+        }
+    }
+
+    // Acquire IDXGIKeyedMutex if the texture has one (cross-device sync)
+    IDXGIKeyedMutex* km = nullptr;
+    sharedTex->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&km);
+    if (km)
+    {
+        hr = km->AcquireSync(0, 100); // wait up to 100ms
+        if (FAILED(hr))
+        {
+            km->Release();
             sharedTex->Release();
             return;
         }
     }
 
+    // Build SRV on the shared texture
     D3D11_TEXTURE2D_DESC desc{};
     sharedTex->GetDesc(&desc);
 
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
-    switch (desc.Format)
+    // Determine crop region: if side-by-side (width >= 2*eyeW), use right half
+    bool isSideBySide = (desc.Width >= m_eyeW * 2);
+    uint32_t srcX     = 0;
+    uint32_t srcW     = m_eyeW;
+    uint32_t srcH     = m_eyeH;
+
+    // Create a staging texture of single-eye size to receive the crop
+    D3D11_TEXTURE2D_DESC stageDesc{};
+    stageDesc.Width            = srcW;
+    stageDesc.Height           = srcH;
+    stageDesc.MipLevels        = 1;
+    stageDesc.ArraySize        = 1;
+    stageDesc.Format           = (desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ||
+                                   desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+                                  ? DXGI_FORMAT_R8G8B8A8_UNORM
+                                  : DXGI_FORMAT_B8G8R8A8_UNORM;
+    stageDesc.SampleDesc.Count = 1;
+    stageDesc.Usage            = D3D11_USAGE_DEFAULT;
+    stageDesc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+    ID3D11Texture2D* cropTex = nullptr;
+    HRESULT hr2 = m_dev->CreateTexture2D(&stageDesc, nullptr, &cropTex);
+
+    if (SUCCEEDED(hr2))
     {
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-        srvd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-        srvd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-    default:
-        srvd.Format = desc.Format; break;
+        // Copy right half of shared texture into cropTex
+        D3D11_BOX box{};
+        box.left   = srcX;
+        box.right  = srcX + srcW;
+        box.top    = 0;
+        box.bottom = srcH;
+        box.front  = 0;
+        box.back   = 1;
+        m_ctx->CopySubresourceRegion(cropTex, 0, 0, 0, 0, sharedTex, 0, &box);
     }
-    srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvd.Texture2D.MipLevels = 1;
+
+    // Release KeyedMutex after copy (before we use GPU)
+    if (km)
+    {
+        km->ReleaseSync(0);
+        km->Release();
+    }
+    sharedTex->Release();
+
+    if (FAILED(hr2) || !cropTex)
+    {
+        DriverLog("[YUNA Display] CreateTexture2D(crop) failed 0x%08X\n",(unsigned)hr2);
+        return;
+    }
+
+    // Build SRV on the cropped single-eye texture
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+    srvd.Format                    = stageDesc.Format;
+    srvd.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvd.Texture2D.MipLevels       = 1;
 
     ID3D11ShaderResourceView* srv = nullptr;
-    hr = m_dev->CreateShaderResourceView(sharedTex, &srvd, &srv);
-    if (SUCCEEDED(hr) && srv)
+    hr = m_dev->CreateShaderResourceView(cropTex, &srvd, &srv);
+    cropTex->Release();
+
+    if (FAILED(hr))
     {
-        float clr[4] = {0,0,0,1};
-        m_ctx->ClearRenderTargetView(m_rtv, clr);
-        m_ctx->OMSetRenderTargets(1, &m_rtv, nullptr);
-
-        UINT stride = sizeof(Vtx), off = 0;
-        m_ctx->IASetInputLayout(m_layout);
-        m_ctx->IASetVertexBuffers(0, 1, &m_vb, &stride, &off);
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_ctx->VSSetShader(m_vs, nullptr, 0);
-        m_ctx->PSSetShader(m_ps, nullptr, 0);
-        m_ctx->PSSetShaderResources(0, 1, &srv);
-        m_ctx->PSSetSamplers(0, 1, &m_sampler);
-        m_ctx->Draw(6, 0);
-
-        ID3D11ShaderResourceView* nullSrv = nullptr;
-        m_ctx->PSSetShaderResources(0, 1, &nullSrv);
-
-        srv->Release();
-        m_swap->Present(0, 0);
+        DriverLog("[YUNA Display] CreateSRV failed 0x%08X\n",(unsigned)hr);
+        return;
     }
 
-    if (keyedMutex)
-    {
-        keyedMutex->ReleaseSync(0);
-        keyedMutex->Release();
-    }
+    // Viewport: single eye size (window is EYE_W x EYE_H)
+    D3D11_VIEWPORT vp{};
+    vp.Width    = (float)m_eyeW;
+    vp.Height   = (float)m_eyeH;
+    vp.MaxDepth = 1.f;
+    m_ctx->RSSetViewports(1, &vp);
 
-    sharedTex->Release();
+    // Draw full-screen quad (PS samples right half of stereo texture)
+    float clr[4]={0,0,0,1};
+    m_ctx->ClearRenderTargetView(m_rtv,clr);
+    m_ctx->OMSetRenderTargets(1,&m_rtv,nullptr);
+    m_ctx->IASetInputLayout(m_layout);
+    UINT stride=sizeof(Vtx),off=0;
+    m_ctx->IASetVertexBuffers(0,1,&m_vb,&stride,&off);
+    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_ctx->VSSetShader(m_vs,nullptr,0);
+    m_ctx->PSSetShader(m_ps,nullptr,0);
+    m_ctx->PSSetShaderResources(0,1,&srv);
+    m_ctx->PSSetSamplers(0,1,&m_sampler);
+    m_ctx->Draw(6,0);
+
+    // Unbind SRV before releasing
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    m_ctx->PSSetShaderResources(0,1,&nullSrv);
+    srv->Release();
+
+    m_swap->Present(0,0);
 }
 
 // ---------------------------------------------------------------------------

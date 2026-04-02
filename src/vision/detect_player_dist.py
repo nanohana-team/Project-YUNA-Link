@@ -34,6 +34,8 @@ DETECT_MODEL_MAP = {
     "x": MODEL_DIR / "yolo26x.pt",
 }
 
+POSE_MODEL_PATH = MODEL_DIR / "yolo26x-pose.pt"
+
 DEFAULT_WINDOW_TITLE = "YUNA Link - VR View"
 
 # ============================================================
@@ -120,12 +122,16 @@ class StepTimer:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Detect player distance from stereo VR window using PrintWindow or screen-region fallback"
+        description="Detect player from single-eye VR window using person detection + pose-based face point"
     )
-    parser.add_argument("--model", choices=["n", "s", "m", "l", "x"], default="n")
+    parser.add_argument("--model", choices=["n", "s", "m", "l", "x"], default="x")
     parser.add_argument("--conf", type=float, default=0.35)
-    parser.add_argument("--imgsz", type=int, default=320)
+    parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--device", default="0")
+
+    parser.add_argument("--pose-model", default=str(POSE_MODEL_PATH))
+    parser.add_argument("--pose-conf", type=float, default=0.25)
+    parser.add_argument("--face-kpt-conf", type=float, default=0.35)
 
     parser.add_argument("--window-title", default=DEFAULT_WINDOW_TITLE)
     parser.add_argument("--hwnd", type=int, default=0, help="Use specific hwnd directly")
@@ -135,11 +141,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fallback-width", type=int, default=1920)
     parser.add_argument("--fallback-height", type=int, default=1080)
 
-    parser.add_argument("--title", default="YOLO Player Distance")
-    parser.add_argument("--baseline-m", type=float, default=0.064)
-    parser.add_argument("--h-fov-deg", type=float, default=100.0)
-    parser.add_argument("--min-disparity-px", type=float, default=1.0)
-    parser.add_argument("--max-per-eye", type=int, default=6)
+    parser.add_argument("--title", default="YOLO Player Detect (Right Eye)")
+    parser.add_argument("--max-persons", type=int, default=6)
     parser.add_argument("--center-priority", action="store_true")
 
     parser.add_argument("--debug-windows", action="store_true")
@@ -166,7 +169,7 @@ def parse_args() -> argparse.Namespace:
         "--max-track-miss",
         type=int,
         default=8,
-        help="How many frames to keep the last tracked stereo pair after detection is lost",
+        help="How many frames to keep the last tracked box after detection is lost",
     )
 
     parser.add_argument(
@@ -186,7 +189,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable-query-server",
         action="store_true",
-        help="Disable local query server for player position/distance requests",
+        help="Disable local query server for player position requests",
     )
 
     return parser.parse_args()
@@ -216,6 +219,7 @@ def is_excluded_window_title(title: str) -> bool:
         "python",
         "yolo26 person detection",
         "yolo player distance",
+        "yolo player detect",
     ]
     return any(k in t for k in exclude_keywords)
 
@@ -568,68 +572,71 @@ def init_yolo(model_path: Path, conf: float, device: str, imgsz: int, slow_ms: f
     return model, person_class_id, actual_device
 
 
-# ============================================================
-# Stereo helpers
-# ============================================================
+def init_pose_yolo(model_path: Path, conf: float, device: str, imgsz: int, slow_ms: float):
+    with StepTimer("init_pose_yolo.load_model", slow_ms):
+        model = load_model(model_path)
 
-def split_left_right(frame: np.ndarray):
-    h, w = frame.shape[:2]
-    mid = w // 2
-    return frame[:, :mid], frame[:, mid:]
+    warmup_img = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+    actual_device = device
+    if str(device).lower() == "auto":
+        actual_device = "0"
 
+    try:
+        with StepTimer(f"init_pose_yolo.warmup[{actual_device}]-1", slow_ms):
+            model.predict(
+                warmup_img,
+                conf=conf,
+                device=actual_device,
+                verbose=False,
+                imgsz=imgsz,
+            )
+        for i in range(2):
+            with StepTimer(f"init_pose_yolo.warmup[{actual_device}]-extra{i+1}", slow_ms):
+                model.predict(
+                    warmup_img,
+                    conf=conf,
+                    device=actual_device,
+                    verbose=False,
+                    imgsz=imgsz,
+                )
+    except Exception as exc:
+        if str(actual_device).lower() != "cpu":
+            log(f"[WARN ] pose GPU init failed ({exc}) -> fallback to CPU")
+            actual_device = "cpu"
+            with StepTimer("init_pose_yolo.warmup[cpu]", slow_ms):
+                model.predict(
+                    warmup_img,
+                    conf=conf,
+                    device="cpu",
+                    verbose=False,
+                    imgsz=imgsz,
+                )
+        else:
+            raise
+
+    return model, actual_device
+
+
+# ============================================================
+# Detection helpers
+# ============================================================
 
 def box_center(box_xyxy):
     x1, y1, x2, y2 = box_xyxy
     return ((float(x1) + float(x2)) * 0.5, (float(y1) + float(y2)) * 0.5)
 
 
-def box_size(box_xyxy):
+def box_size_norm(box_xyxy, image_w: int, image_h: int):
     x1, y1, x2, y2 = box_xyxy
-    return (max(0.0, float(x2) - float(x1)), max(0.0, float(y2) - float(y1)))
+    bw = max(0.0, float(x2) - float(x1))
+    bh = max(0.0, float(y2) - float(y1))
+    if image_w <= 0 or image_h <= 0:
+        return None, None, None
+    bw_norm = bw / float(image_w)
+    bh_norm = bh / float(image_h)
+    area_norm = bw_norm * bh_norm
+    return float(bw_norm), float(bh_norm), float(area_norm)
 
-
-def focal_length_px_from_fov(width_px: int, fov_deg: float) -> float:
-    fov_rad = np.deg2rad(fov_deg)
-    return (width_px / 2.0) / np.tan(fov_rad / 2.0)
-
-
-def calc_distance_from_points(
-    left_x: float,
-    right_x: float,
-    image_width_px: int,
-    h_fov_deg: float,
-    baseline_m: float,
-    min_disparity_px: float = 1.0,
-):
-    focal_px = focal_length_px_from_fov(image_width_px, h_fov_deg)
-    disparity_px = float(left_x) - float(right_x)
-    d = abs(disparity_px)
-
-    if d < float(min_disparity_px):
-        distance_m = None
-    else:
-        distance_m = (float(focal_px) * float(baseline_m)) / d
-
-    if distance_m is None:
-        category = "unknown"
-    elif distance_m < 1.0:
-        category = "near"
-    elif distance_m < 2.5:
-        category = "mid"
-    else:
-        category = "far"
-
-    return {
-        "disparity_px": disparity_px,
-        "distance_m": distance_m,
-        "category": category,
-        "focal_px": focal_px,
-    }
-
-
-# ============================================================
-# Detection
-# ============================================================
 
 def extract_person_boxes_single_pass(
     model: YOLO,
@@ -685,36 +692,149 @@ def sort_and_limit_boxes(boxes, image_w: int, image_h: int, max_count: int, cent
     return boxes[:max_count]
 
 
-def split_global_boxes_to_eyes(boxes, frame_width: int):
-    mid = frame_width // 2
-    left_boxes = []
-    right_boxes = []
+# ============================================================
+# Pose / Face helpers
+# ============================================================
 
-    for b in boxes:
-        x1, y1, x2, y2 = b["xyxy"]
-        cx, _cy = box_center(b["xyxy"])
+KP_NOSE = 0
+KP_LEFT_EYE = 1
+KP_RIGHT_EYE = 2
+KP_LEFT_EAR = 3
+KP_RIGHT_EAR = 4
+KP_LEFT_SHOULDER = 5
+KP_RIGHT_SHOULDER = 6
 
-        if cx < mid:
-            left_boxes.append({"xyxy": (x1, y1, x2, y2), "conf": b["conf"]})
+
+def _pick_valid_kpt(points_xy: np.ndarray, points_conf: np.ndarray, idx: int, min_conf: float):
+    if points_xy is None or points_conf is None:
+        return None
+    if idx < 0 or idx >= len(points_xy):
+        return None
+    x, y = points_xy[idx]
+    c = float(points_conf[idx])
+    if not np.isfinite(x) or not np.isfinite(y):
+        return None
+    if c < min_conf:
+        return None
+    return float(x), float(y), c
+
+
+def _mean_xy(items):
+    if not items:
+        return None
+    xs = [p[0] for p in items]
+    ys = [p[1] for p in items]
+    cs = [p[2] for p in items]
+    return float(np.mean(xs)), float(np.mean(ys)), float(np.mean(cs))
+
+
+def extract_pose_people(
+    model: YOLO,
+    frame: np.ndarray,
+    conf: float,
+    imgsz: int,
+    device: str,
+    face_kpt_conf: float,
+):
+    results = model.predict(
+        source=frame,
+        conf=conf,
+        imgsz=imgsz,
+        device=device,
+        verbose=False,
+    )
+
+    people = []
+
+    for result in results:
+        if result.boxes is None:
+            continue
+        if result.keypoints is None:
+            continue
+
+        boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+        boxes_conf = result.boxes.conf.cpu().numpy()
+
+        kpt_xy = result.keypoints.xy.cpu().numpy() if result.keypoints.xy is not None else None
+        if hasattr(result.keypoints, "conf") and result.keypoints.conf is not None:
+            kpt_conf = result.keypoints.conf.cpu().numpy()
         else:
-            right_boxes.append({"xyxy": (x1 - mid, y1, x2 - mid, y2), "conf": b["conf"]})
+            kpt_conf = None
 
-    return left_boxes, right_boxes
+        if kpt_xy is None or kpt_conf is None:
+            continue
+
+        count = min(len(boxes_xyxy), len(kpt_xy), len(kpt_conf))
+        for i in range(count):
+            box = tuple(map(float, boxes_xyxy[i]))
+            det_conf = float(boxes_conf[i])
+
+            pts_xy = kpt_xy[i]
+            pts_cf = kpt_conf[i]
+
+            nose = _pick_valid_kpt(pts_xy, pts_cf, KP_NOSE, face_kpt_conf)
+            left_eye = _pick_valid_kpt(pts_xy, pts_cf, KP_LEFT_EYE, face_kpt_conf)
+            right_eye = _pick_valid_kpt(pts_xy, pts_cf, KP_RIGHT_EYE, face_kpt_conf)
+            left_ear = _pick_valid_kpt(pts_xy, pts_cf, KP_LEFT_EAR, face_kpt_conf)
+            right_ear = _pick_valid_kpt(pts_xy, pts_cf, KP_RIGHT_EAR, face_kpt_conf)
+            left_shoulder = _pick_valid_kpt(pts_xy, pts_cf, KP_LEFT_SHOULDER, face_kpt_conf)
+            right_shoulder = _pick_valid_kpt(pts_xy, pts_cf, KP_RIGHT_SHOULDER, face_kpt_conf)
+
+            face_point = None
+            face_source = "none"
+
+            if nose is not None:
+                face_point = (nose[0], nose[1], nose[2])
+                face_source = "nose"
+            else:
+                eyes_mean = _mean_xy([p for p in [left_eye, right_eye] if p is not None])
+                if eyes_mean is not None:
+                    face_point = eyes_mean
+                    face_source = "eyes_mean"
+                else:
+                    head_mean = _mean_xy([p for p in [left_eye, right_eye, left_ear, right_ear] if p is not None])
+                    if head_mean is not None:
+                        face_point = head_mean
+                        face_source = "head_mean"
+                    else:
+                        shoulders_mean = _mean_xy([p for p in [left_shoulder, right_shoulder] if p is not None])
+                        if shoulders_mean is not None:
+                            x1, y1, x2, y2 = box
+                            box_h = max(1.0, y2 - y1)
+                            fx = shoulders_mean[0]
+                            fy = shoulders_mean[1] - box_h * 0.18
+                            fc = shoulders_mean[2] * 0.5
+                            face_point = (float(fx), float(fy), float(fc))
+                            face_source = "shoulder_est"
+
+            people.append(
+                {
+                    "xyxy": box,
+                    "conf": det_conf,
+                    "face_point": face_point,
+                    "face_source": face_source,
+                    "nose": nose,
+                    "left_eye": left_eye,
+                    "right_eye": right_eye,
+                    "left_ear": left_ear,
+                    "right_ear": right_ear,
+                    "left_shoulder": left_shoulder,
+                    "right_shoulder": right_shoulder,
+                }
+            )
+
+    return people
 
 
 # ============================================================
-# Short-term tracking / interpolation
+# Single-eye tracking
 # ============================================================
 
 @dataclass
 class TrackState:
-    left_box: Optional[tuple] = None
-    right_box: Optional[tuple] = None
-    left_conf: float = 0.0
-    right_conf: float = 0.0
+    box: Optional[tuple] = None
+    conf: float = 0.0
     miss_count: int = 0
-    last_distance_m: Optional[float] = None
-    last_disparity_px: Optional[float] = None
 
 
 @dataclass
@@ -727,20 +847,41 @@ class SharedPlayerState:
     distance_raw_m: Optional[float] = None
     disparity_px: Optional[float] = None
     category: str = "unknown"
+
     screen_x_px: Optional[float] = None
     screen_y_px: Optional[float] = None
     screen_x_norm: Optional[float] = None
     screen_y_norm: Optional[float] = None
+
     frame_width: int = 0
     frame_height: int = 0
-    left_cx_px: Optional[float] = None
+
     right_cx_px: Optional[float] = None
-    left_cy_px: Optional[float] = None
     right_cy_px: Optional[float] = None
     right_dx_px: Optional[float] = None
     right_dy_px: Optional[float] = None
     right_dx_norm: Optional[float] = None
     right_dy_norm: Optional[float] = None
+
+    aim_source: str = "body"
+
+    body_available: bool = False
+    body_x_px: Optional[float] = None
+    body_y_px: Optional[float] = None
+    body_x_norm: Optional[float] = None
+    body_y_norm: Optional[float] = None
+
+    face_available: bool = False
+    face_x_px: Optional[float] = None
+    face_y_px: Optional[float] = None
+    face_x_norm: Optional[float] = None
+    face_y_norm: Optional[float] = None
+    face_conf: Optional[float] = None
+    face_source: str = "none"
+
+    box_w_norm: Optional[float] = None
+    box_h_norm: Optional[float] = None
+    box_area_norm: Optional[float] = None
 
     def update(
         self,
@@ -757,14 +898,28 @@ class SharedPlayerState:
         screen_y_px: Optional[float],
         screen_x_norm: Optional[float],
         screen_y_norm: Optional[float],
-        left_cx_px: Optional[float],
         right_cx_px: Optional[float],
-        left_cy_px: Optional[float],
         right_cy_px: Optional[float],
         right_dx_px: Optional[float],
         right_dy_px: Optional[float],
         right_dx_norm: Optional[float],
         right_dy_norm: Optional[float],
+        aim_source: str,
+        body_available: bool,
+        body_x_px: Optional[float],
+        body_y_px: Optional[float],
+        body_x_norm: Optional[float],
+        body_y_norm: Optional[float],
+        face_available: bool,
+        face_x_px: Optional[float],
+        face_y_px: Optional[float],
+        face_x_norm: Optional[float],
+        face_y_norm: Optional[float],
+        face_conf: Optional[float],
+        face_source: str,
+        box_w_norm: Optional[float],
+        box_h_norm: Optional[float],
+        box_area_norm: Optional[float],
     ) -> None:
         with self.lock:
             self.timestamp = time.time()
@@ -776,18 +931,38 @@ class SharedPlayerState:
             self.distance_raw_m = distance_raw_m
             self.disparity_px = disparity_px
             self.category = category
+
             self.screen_x_px = screen_x_px
             self.screen_y_px = screen_y_px
             self.screen_x_norm = screen_x_norm
             self.screen_y_norm = screen_y_norm
-            self.left_cx_px = left_cx_px
+
             self.right_cx_px = right_cx_px
-            self.left_cy_px = left_cy_px
             self.right_cy_px = right_cy_px
             self.right_dx_px = right_dx_px
             self.right_dy_px = right_dy_px
             self.right_dx_norm = right_dx_norm
             self.right_dy_norm = right_dy_norm
+
+            self.aim_source = aim_source
+
+            self.body_available = body_available
+            self.body_x_px = body_x_px
+            self.body_y_px = body_y_px
+            self.body_x_norm = body_x_norm
+            self.body_y_norm = body_y_norm
+
+            self.face_available = face_available
+            self.face_x_px = face_x_px
+            self.face_y_px = face_y_px
+            self.face_x_norm = face_x_norm
+            self.face_y_norm = face_y_norm
+            self.face_conf = face_conf
+            self.face_source = face_source
+
+            self.box_w_norm = box_w_norm
+            self.box_h_norm = box_h_norm
+            self.box_area_norm = box_area_norm
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -799,20 +974,40 @@ class SharedPlayerState:
                 "distance_raw_m": self.distance_raw_m,
                 "disparity_px": self.disparity_px,
                 "category": self.category,
+
                 "screen_x_px": self.screen_x_px,
                 "screen_y_px": self.screen_y_px,
                 "screen_x_norm": self.screen_x_norm,
                 "screen_y_norm": self.screen_y_norm,
                 "frame_width": self.frame_width,
                 "frame_height": self.frame_height,
-                "left_cx_px": self.left_cx_px,
+
                 "right_cx_px": self.right_cx_px,
-                "left_cy_px": self.left_cy_px,
                 "right_cy_px": self.right_cy_px,
                 "right_dx_px": self.right_dx_px,
                 "right_dy_px": self.right_dy_px,
                 "right_dx_norm": self.right_dx_norm,
                 "right_dy_norm": self.right_dy_norm,
+
+                "aim_source": self.aim_source,
+
+                "body_available": self.body_available,
+                "body_x_px": self.body_x_px,
+                "body_y_px": self.body_y_px,
+                "body_x_norm": self.body_x_norm,
+                "body_y_norm": self.body_y_norm,
+
+                "face_available": self.face_available,
+                "face_x_px": self.face_x_px,
+                "face_y_px": self.face_y_px,
+                "face_x_norm": self.face_x_norm,
+                "face_y_norm": self.face_y_norm,
+                "face_conf": self.face_conf,
+                "face_source": self.face_source,
+
+                "box_w_norm": self.box_w_norm,
+                "box_h_norm": self.box_h_norm,
+                "box_area_norm": self.box_area_norm,
             }
 
 
@@ -843,6 +1038,7 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
                     "ok": bool(snap["available"]),
                     "timestamp": snap["timestamp"],
                     "track_mode": snap["track_mode"],
+                    "aim_source": snap["aim_source"],
                     "screen": {
                         "x_px": snap["screen_x_px"],
                         "y_px": snap["screen_y_px"],
@@ -850,6 +1046,25 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
                         "y_norm": snap["screen_y_norm"],
                         "frame_width": snap["frame_width"],
                         "frame_height": snap["frame_height"],
+                        "box_w_norm": snap["box_w_norm"],
+                        "box_h_norm": snap["box_h_norm"],
+                        "box_area_norm": snap["box_area_norm"],
+                    },
+                    "body": {
+                        "available": snap["body_available"],
+                        "x_px": snap["body_x_px"],
+                        "y_px": snap["body_y_px"],
+                        "x_norm": snap["body_x_norm"],
+                        "y_norm": snap["body_y_norm"],
+                    },
+                    "face": {
+                        "available": snap["face_available"],
+                        "x_px": snap["face_x_px"],
+                        "y_px": snap["face_y_px"],
+                        "x_norm": snap["face_x_norm"],
+                        "y_norm": snap["face_y_norm"],
+                        "conf": snap["face_conf"],
+                        "source": snap["face_source"],
                     },
                     "right_offset": {
                         "dx_px": snap["right_dx_px"],
@@ -861,13 +1076,14 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
 
             elif cmd == "GET PLAYER_DIST":
                 payload = {
-                    "ok": bool(snap["available"]) and (snap["distance_m"] is not None),
+                    "ok": False,
                     "timestamp": snap["timestamp"],
                     "track_mode": snap["track_mode"],
-                    "distance_m": snap["distance_m"],
-                    "distance_raw_m": snap["distance_raw_m"],
-                    "disparity_px": snap["disparity_px"],
-                    "category": snap["category"],
+                    "distance_m": None,
+                    "distance_raw_m": None,
+                    "disparity_px": None,
+                    "category": "unknown",
+                    "reason": "single_eye_mode_no_stereo_distance",
                 }
 
             elif cmd == "GET PLAYER_INFO":
@@ -875,6 +1091,7 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
                     "ok": bool(snap["available"]),
                     "timestamp": snap["timestamp"],
                     "track_mode": snap["track_mode"],
+                    "aim_source": snap["aim_source"],
                     "screen": {
                         "x_px": snap["screen_x_px"],
                         "y_px": snap["screen_y_px"],
@@ -882,6 +1099,25 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
                         "y_norm": snap["screen_y_norm"],
                         "frame_width": snap["frame_width"],
                         "frame_height": snap["frame_height"],
+                        "box_w_norm": snap["box_w_norm"],
+                        "box_h_norm": snap["box_h_norm"],
+                        "box_area_norm": snap["box_area_norm"],
+                    },
+                    "body": {
+                        "available": snap["body_available"],
+                        "x_px": snap["body_x_px"],
+                        "y_px": snap["body_y_px"],
+                        "x_norm": snap["body_x_norm"],
+                        "y_norm": snap["body_y_norm"],
+                    },
+                    "face": {
+                        "available": snap["face_available"],
+                        "x_px": snap["face_x_px"],
+                        "y_px": snap["face_y_px"],
+                        "x_norm": snap["face_x_norm"],
+                        "y_norm": snap["face_y_norm"],
+                        "conf": snap["face_conf"],
+                        "source": snap["face_source"],
                     },
                     "right_offset": {
                         "dx_px": snap["right_dx_px"],
@@ -889,10 +1125,10 @@ class PlayerQueryHandler(socketserver.StreamRequestHandler):
                         "dx_norm": snap["right_dx_norm"],
                         "dy_norm": snap["right_dy_norm"],
                     },
-                    "distance_m": snap["distance_m"],
-                    "distance_raw_m": snap["distance_raw_m"],
-                    "disparity_px": snap["disparity_px"],
-                    "category": snap["category"],
+                    "distance_m": None,
+                    "distance_raw_m": None,
+                    "disparity_px": None,
+                    "category": "unknown",
                 }
 
             else:
@@ -912,46 +1148,36 @@ def start_query_server(host: str, port: int, shared_state: SharedPlayerState):
     return server, thread
 
 
-def compute_player_screen_position(
-    left_box,
-    right_box,
-    frame_width: int,
-    frame_height: int,
-):
-    if left_box is None or right_box is None:
+def compute_point_screen_position(point_xy, frame_width: int, frame_height: int):
+    if point_xy is None:
         return None
 
-    half_width = frame_width * 0.5
-    lcx, lcy = box_center(left_box)
-    rcx, rcy = box_center(right_box)
+    px, py = point_xy
+    screen_x_px = float(px)
+    screen_y_px = float(py)
 
-    # 全体の左半分(左目)基準の screen 座標
-    screen_x_px = (float(lcx) + float(rcx)) * 0.5
-    screen_y_px = (float(lcy) + float(rcy)) * 0.5
+    center_x = frame_width * 0.5
+    center_y = frame_height * 0.5
 
     x_norm = 0.0
     y_norm = 0.0
-    if half_width > 1e-6:
-        x_norm = (screen_x_px - (half_width * 0.5)) / (half_width * 0.5)
-    if frame_height > 1e-6:
-        y_norm = (screen_y_px - (frame_height * 0.5)) / (frame_height * 0.5)
+    if center_x > 1e-6:
+        x_norm = (screen_x_px - center_x) / center_x
+    if center_y > 1e-6:
+        y_norm = (screen_y_px - center_y) / center_y
 
     x_norm = float(np.clip(x_norm, -1.0, 1.0))
     y_norm = float(np.clip(y_norm, -1.0, 1.0))
 
-    # 右目ローカル座標系での中央差分
-    right_center_x = half_width * 0.5
-    right_center_y = frame_height * 0.5
-
-    right_dx_px = float(rcx - right_center_x)
-    right_dy_px = float(rcy - right_center_y)
+    right_dx_px = float(screen_x_px - center_x)
+    right_dy_px = float(screen_y_px - center_y)
 
     right_dx_norm = 0.0
     right_dy_norm = 0.0
-    if right_center_x > 1e-6:
-        right_dx_norm = right_dx_px / right_center_x
-    if right_center_y > 1e-6:
-        right_dy_norm = right_dy_px / right_center_y
+    if center_x > 1e-6:
+        right_dx_norm = right_dx_px / center_x
+    if center_y > 1e-6:
+        right_dy_norm = right_dy_px / center_y
 
     right_dx_norm = float(np.clip(right_dx_norm, -1.0, 1.0))
     right_dy_norm = float(np.clip(right_dy_norm, -1.0, 1.0))
@@ -961,15 +1187,20 @@ def compute_player_screen_position(
         "screen_y_px": screen_y_px,
         "screen_x_norm": x_norm,
         "screen_y_norm": y_norm,
-        "left_cx_px": float(lcx),
-        "right_cx_px": float(rcx),
-        "left_cy_px": float(lcy),
-        "right_cy_px": float(rcy),
+        "right_cx_px": screen_x_px,
+        "right_cy_px": screen_y_px,
         "right_dx_px": right_dx_px,
         "right_dy_px": right_dy_px,
         "right_dx_norm": right_dx_norm,
         "right_dy_norm": right_dy_norm,
     }
+
+
+def compute_player_screen_position(box, frame_width: int, frame_height: int):
+    if box is None:
+        return None
+    cx, cy = box_center(box)
+    return compute_point_screen_position((cx, cy), frame_width, frame_height)
 
 
 def iou_xyxy(box_a, box_b) -> float:
@@ -1013,7 +1244,6 @@ def find_best_match_for_track(prev_box, current_boxes):
         box = item["xyxy"]
         iou = iou_xyxy(prev_box, box)
         dist2 = center_distance_sq(prev_box, box)
-
         score = dist2 - iou * 50000.0
 
         if best_score is None or score < best_score:
@@ -1023,66 +1253,62 @@ def find_best_match_for_track(prev_box, current_boxes):
     return best_idx
 
 
-def update_track_with_detections(track: TrackState, left_boxes, right_boxes, max_miss: int = 8):
-    left_found = False
-    right_found = False
+def update_track_with_detections(track: TrackState, boxes, max_miss: int = 8):
+    found = False
 
-    if left_boxes:
-        idx = find_best_match_for_track(track.left_box, left_boxes)
+    if boxes:
+        idx = find_best_match_for_track(track.box, boxes)
         if idx is None:
             idx = 0
-        chosen = left_boxes.pop(idx)
-        track.left_box = chosen["xyxy"]
-        track.left_conf = float(chosen["conf"])
-        left_found = True
+        chosen = boxes.pop(idx)
+        track.box = chosen["xyxy"]
+        track.conf = float(chosen["conf"])
+        found = True
 
-    if right_boxes:
-        idx = find_best_match_for_track(track.right_box, right_boxes)
-        if idx is None:
-            idx = 0
-        chosen = right_boxes.pop(idx)
-        track.right_box = chosen["xyxy"]
-        track.right_conf = float(chosen["conf"])
-        right_found = True
-
-    if left_found and right_found:
+    if found:
         track.miss_count = 0
         return True, "detected"
 
-    if left_found or right_found:
-        track.miss_count += 1
-        if track.miss_count <= max_miss and track.left_box is not None and track.right_box is not None:
-            track.left_conf *= 0.92
-            track.right_conf *= 0.92
-            return True, "partial_interpolate"
-        return False, "partial_lost"
-
     track.miss_count += 1
-    if track.miss_count <= max_miss and track.left_box is not None and track.right_box is not None:
-        track.left_conf *= 0.88
-        track.right_conf *= 0.88
+    if track.miss_count <= max_miss and track.box is not None:
+        track.conf *= 0.90
         return True, "reused_last_frame"
 
-    track.left_box = None
-    track.right_box = None
-    track.left_conf = 0.0
-    track.right_conf = 0.0
-    track.last_distance_m = None
-    track.last_disparity_px = None
+    track.box = None
+    track.conf = 0.0
     return False, "lost"
 
 
-def draw_track_boxes(left_img, right_img, track: TrackState, mode: str):
+def find_best_pose_person_for_track(track_box, pose_people):
+    if track_box is None or not pose_people:
+        return None
+
+    best = None
+    best_score = None
+
+    for person in pose_people:
+        pbox = person["xyxy"]
+        iou = iou_xyxy(track_box, pbox)
+        dist2 = center_distance_sq(track_box, pbox)
+        score = -(iou * 100000.0) + dist2
+        if best_score is None or score < best_score:
+            best_score = score
+            best = person
+
+    return best
+
+
+def draw_track_box(img, track: TrackState, mode: str):
     color = (0, 200, 255) if mode == "detected" else (0, 120, 255)
 
-    if track.left_box is not None:
-        x1, y1, x2, y2 = map(int, track.left_box)
-        cx, cy = box_center(track.left_box)
-        cv2.rectangle(left_img, (x1, y1), (x2, y2), color, 2)
-        cv2.circle(left_img, (int(cx), int(cy)), 4, color, -1)
+    if track.box is not None:
+        x1, y1, x2, y2 = map(int, track.box)
+        cx, cy = box_center(track.box)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(img, (int(cx), int(cy)), 4, color, -1)
         cv2.putText(
-            left_img,
-            f"TRACK L {track.left_conf:.2f}",
+            img,
+            f"TRACK {track.conf:.2f}",
             (x1, max(24, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -1091,26 +1317,6 @@ def draw_track_boxes(left_img, right_img, track: TrackState, mode: str):
             cv2.LINE_AA,
         )
 
-    if track.right_box is not None:
-        x1, y1, x2, y2 = map(int, track.right_box)
-        cx, cy = box_center(track.right_box)
-        cv2.rectangle(right_img, (x1, y1), (x2, y2), color, 2)
-        cv2.circle(right_img, (int(cx), int(cy)), 4, color, -1)
-        cv2.putText(
-            right_img,
-            f"TRACK R {track.right_conf:.2f}",
-            (x1, max(24, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
-
-
-# ============================================================
-# Draw
-# ============================================================
 
 def draw_boxes(img: np.ndarray, boxes, color, label_prefix: str):
     for i, b in enumerate(boxes):
@@ -1129,6 +1335,34 @@ def draw_boxes(img: np.ndarray, boxes, color, label_prefix: str):
             2,
             cv2.LINE_AA,
         )
+
+
+def draw_pose_debug(img, pose_person):
+    if pose_person is None:
+        return
+
+    face_point = pose_person.get("face_point")
+    face_source = pose_person.get("face_source", "none")
+
+    if face_point is not None:
+        fx, fy, fc = face_point
+        cv2.circle(img, (int(fx), int(fy)), 6, (0, 80, 255), -1)
+        cv2.putText(
+            img,
+            f"FACE {face_source} {fc:.2f}",
+            (int(fx) + 8, int(fy) - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 80, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    for key in ["nose", "left_eye", "right_eye", "left_ear", "right_ear"]:
+        p = pose_person.get(key)
+        if p is not None:
+            x, y, _ = p
+            cv2.circle(img, (int(x), int(y)), 3, (255, 0, 255), -1)
 
 
 # ============================================================
@@ -1151,7 +1385,7 @@ def main() -> int:
     debug_dir = REPO_ROOT / args.debug_dir
     debug_dir.mkdir(parents=True, exist_ok=True)
 
-    log("[INFO ] detect_player_dist.py start")
+    log("[INFO ] detect_player_dist.py start (single-eye right-eye mode)")
     log(f"[INFO ] args={vars(args)}")
 
     if args.debug_windows:
@@ -1159,6 +1393,7 @@ def main() -> int:
             debug_print_all_windows()
 
     model_path = DETECT_MODEL_MAP[args.model]
+    pose_model_path = Path(args.pose_model)
 
     try:
         detect_model, person_class_id, actual_device = init_yolo(
@@ -1173,8 +1408,21 @@ def main() -> int:
         log(traceback.format_exc())
         return 1
 
-    log(f"[INFO ] model.names    : {detect_model.names}")
-    log(f"[INFO ] person_class_id: {person_class_id}")
+    try:
+        pose_model, pose_device = init_pose_yolo(
+            model_path=pose_model_path,
+            conf=args.pose_conf,
+            device=args.device,
+            imgsz=args.imgsz,
+            slow_ms=args.slow_ms,
+        )
+    except Exception as exc:
+        log(f"[ERROR] Failed to init pose model: {exc!r}")
+        log(traceback.format_exc())
+        return 1
+
+    log(f"[INFO ] detect_model.names : {detect_model.names}")
+    log(f"[INFO ] person_class_id    : {person_class_id}")
 
     fallback_monitor = {
         "top": args.fallback_top,
@@ -1184,15 +1432,16 @@ def main() -> int:
     }
 
     log("========================================")
-    log(" YOLO Player Distance")
+    log(" YOLO Player Detect (Right Eye)")
     log("========================================")
     log(f"[INFO ] Detect model : {model_path}")
+    log(f"[INFO ] Pose model   : {pose_model_path}")
     log(f"[INFO ] Device(req)  : {args.device}")
-    log(f"[INFO ] Device(real) : {actual_device}")
+    log(f"[INFO ] Device(det)  : {actual_device}")
+    log(f"[INFO ] Device(pose) : {pose_device}")
     log(f"[INFO ] Window title : {repr(args.window_title)}")
-    log(f"[INFO ] Baseline[m]  : {args.baseline_m}")
-    log(f"[INFO ] H-FOV[deg]   : {args.h_fov_deg}")
     log(f"[INFO ] PrintWindow  : {'OFF' if args.disable_printwindow else 'AUTO'}")
+    log("[INFO ] Distance     : disabled (single-eye mode)")
     log("========================================")
 
     sct = mss.mss()
@@ -1205,8 +1454,6 @@ def main() -> int:
     debug_capture_last_print = 0.0
     last_heartbeat = 0.0
 
-    ema_distance = None
-    ema_alpha = 0.25
     frame_index = 0
     prev_frame_small = None
 
@@ -1216,10 +1463,9 @@ def main() -> int:
 
     shared_state = SharedPlayerState()
     query_server = None
-    query_thread = None
     if not args.disable_query_server:
         try:
-            query_server, query_thread = start_query_server(
+            query_server, _query_thread = start_query_server(
                 args.query_host,
                 args.query_port,
                 shared_state,
@@ -1373,13 +1619,10 @@ def main() -> int:
                 log(f"[DEBUG] frame_diff_mean={frame_diff_mean:.3f}")
                 log(f"[DEBUG] printwindow_state={printwindow_state}")
 
-            with StepTimer("split_left_right", args.slow_ms):
-                left_frame, right_frame = split_left_right(frame)
-                left_h, left_w = left_frame.shape[:2]
-                right_h, right_w = right_frame.shape[:2]
+            frame_h, frame_w = frame.shape[:2]
 
             with StepTimer("extract_person_boxes_single_pass", args.slow_ms):
-                global_boxes = extract_person_boxes_single_pass(
+                boxes = extract_person_boxes_single_pass(
                     model=detect_model,
                     person_class_id=person_class_id,
                     frame=frame,
@@ -1387,19 +1630,13 @@ def main() -> int:
                     imgsz=args.imgsz,
                     device=actual_device,
                 )
-            log(f"[TRACE] global_boxes={len(global_boxes)}")
+            log(f"[TRACE] boxes={len(boxes)}")
 
-            if len(global_boxes) == 0 and args.save_zero_detect_every > 0:
+            if len(boxes) == 0 and args.save_zero_detect_every > 0:
                 if frame_index % args.save_zero_detect_every == 0:
                     debug_path = debug_dir / f"frame_{frame_index:06d}.png"
-                    left_path = debug_dir / f"frame_{frame_index:06d}_L.png"
-                    right_path = debug_dir / f"frame_{frame_index:06d}_R.png"
                     cv2.imwrite(str(debug_path), frame)
-                    cv2.imwrite(str(left_path), left_frame)
-                    cv2.imwrite(str(right_path), right_frame)
                     log(f"[DEBUG] saved zero-detect frame : {debug_path}")
-                    log(f"[DEBUG] saved zero-detect left  : {left_path}")
-                    log(f"[DEBUG] saved zero-detect right : {right_path}")
 
                     h, w = frame.shape[:2]
                     cx1 = int(w * 0.25)
@@ -1414,7 +1651,7 @@ def main() -> int:
                             person_class_id=person_class_id,
                             frame=center_crop,
                             conf=max(0.15, args.conf - 0.10),
-                            imgsz=max(args.imgsz, 640),
+                            imgsz=max(args.imgsz, 960),
                             device=actual_device,
                         )
                     log(
@@ -1422,183 +1659,160 @@ def main() -> int:
                         f"crop_shape={center_crop.shape}"
                     )
 
-            with StepTimer("split_global_boxes_to_eyes", args.slow_ms):
-                left_boxes, right_boxes = split_global_boxes_to_eyes(global_boxes, frame.shape[1])
-
-            with StepTimer("sort_and_limit_boxes[left]", args.slow_ms):
-                left_boxes = sort_and_limit_boxes(
-                    left_boxes, left_w, left_h, args.max_per_eye, args.center_priority
-                )
-            with StepTimer("sort_and_limit_boxes[right]", args.slow_ms):
-                right_boxes = sort_and_limit_boxes(
-                    right_boxes, right_w, right_h, args.max_per_eye, args.center_priority
+            with StepTimer("sort_and_limit_boxes", args.slow_ms):
+                boxes = sort_and_limit_boxes(
+                    boxes, frame_w, frame_h, args.max_persons, args.center_priority
                 )
 
-            log(f"[TRACE] left_boxes={len(left_boxes)} right_boxes={len(right_boxes)}")
+            log(f"[TRACE] boxes_limited={len(boxes)}")
 
-            with StepTimer("copy_visual_frames", args.slow_ms):
-                vis_left = left_frame.copy()
-                vis_right = right_frame.copy()
+            with StepTimer("copy_visual_frame", args.slow_ms):
+                vis = frame.copy()
 
-            with StepTimer("draw_boxes[left]", args.slow_ms):
-                draw_boxes(vis_left, left_boxes, (0, 255, 0), "L")
-            with StepTimer("draw_boxes[right]", args.slow_ms):
-                draw_boxes(vis_right, right_boxes, (255, 0, 0), "R")
+            with StepTimer("draw_boxes", args.slow_ms):
+                draw_boxes(vis, boxes, (0, 255, 0), "P")
 
             with StepTimer("track_update", args.slow_ms):
-                left_boxes_for_track = [dict(b) for b in left_boxes]
-                right_boxes_for_track = [dict(b) for b in right_boxes]
+                boxes_for_track = [dict(b) for b in boxes]
                 track_ok, track_mode = update_track_with_detections(
                     track,
-                    left_boxes_for_track,
-                    right_boxes_for_track,
+                    boxes_for_track,
                     max_miss=max_track_miss,
                 )
 
-            raw_distance_m = None
-            disparity_px = None
-            category = "unknown"
-
-            if track_ok and track.left_box is not None and track.right_box is not None:
-                with StepTimer("calc_distance_from_track", args.slow_ms):
-                    lcx, _lcy = box_center(track.left_box)
-                    rcx, _rcy = box_center(track.right_box)
-
-                    result = calc_distance_from_points(
-                        left_x=lcx,
-                        right_x=rcx,
-                        image_width_px=left_w,
-                        h_fov_deg=args.h_fov_deg,
-                        baseline_m=args.baseline_m,
-                        min_disparity_px=args.min_disparity_px,
-                    )
-
-                disparity_px = result["disparity_px"]
-                raw_distance_m = result["distance_m"]
-                category = result["category"]
-
-                if raw_distance_m is not None:
-                    if ema_distance is None:
-                        ema_distance = raw_distance_m
-                    else:
-                        ema_distance = ema_alpha * raw_distance_m + (1.0 - ema_alpha) * ema_distance
-
-                    track.last_distance_m = ema_distance
-                    track.last_disparity_px = disparity_px
-
-                with StepTimer("draw_track_boxes", args.slow_ms):
-                    draw_track_boxes(vis_left, vis_right, track, track_mode)
+            if track_ok and track.box is not None:
+                with StepTimer("draw_track_box", args.slow_ms):
+                    draw_track_box(vis, track, track_mode)
 
                 log(
                     f"[TRACE] track_mode={track_mode} miss_count={track.miss_count} "
-                    f"disp={disparity_px:.2f} raw={raw_distance_m} smooth={ema_distance}"
+                    f"box={track.box} conf={track.conf:.3f}"
                 )
             else:
                 log(f"[TRACE] track_mode={track_mode} miss_count={track.miss_count}")
 
-            player_pos = None
-            if track_ok and track.left_box is not None and track.right_box is not None:
-                player_pos = compute_player_screen_position(
-                    track.left_box,
-                    track.right_box,
-                    frame.shape[1],
-                    frame.shape[0],
+            pose_people = []
+            matched_pose_person = None
+            with StepTimer("extract_pose_people", args.slow_ms):
+                pose_people = extract_pose_people(
+                    model=pose_model,
+                    frame=frame,
+                    conf=args.pose_conf,
+                    imgsz=args.imgsz,
+                    device=pose_device,
+                    face_kpt_conf=args.face_kpt_conf,
                 )
+            log(f"[TRACE] pose_people={len(pose_people)}")
+
+            if track_ok and track.box is not None and pose_people:
+                matched_pose_person = find_best_pose_person_for_track(track.box, pose_people)
+
+            body_pos = None
+            box_w_norm = None
+            box_h_norm = None
+            box_area_norm = None
+            if track_ok and track.box is not None:
+                body_pos = compute_player_screen_position(track.box, frame_w, frame_h)
+                box_w_norm, box_h_norm, box_area_norm = box_size_norm(track.box, frame_w, frame_h)
+
+            face_pos = None
+            face_available = False
+            face_conf = None
+            face_source = "none"
+
+            if matched_pose_person is not None:
+                draw_pose_debug(vis, matched_pose_person)
+                fp = matched_pose_person.get("face_point")
+                if fp is not None:
+                    face_pos = compute_point_screen_position((fp[0], fp[1]), frame_w, frame_h)
+                    face_available = True
+                    face_conf = float(fp[2])
+                    face_source = matched_pose_person.get("face_source", "none")
+
+            main_pos = face_pos if face_pos is not None else body_pos
+            aim_source = "face" if face_pos is not None else "body"
 
             shared_state.update(
-                available=bool(track_ok and player_pos is not None),
+                available=bool(track_ok and main_pos is not None),
                 track_mode=track_mode,
-                frame_width=left_w,
-                frame_height=frame.shape[0],
-                distance_m=ema_distance if (track_ok and player_pos is not None) else None,
-                distance_raw_m=raw_distance_m if (track_ok and player_pos is not None) else None,
-                disparity_px=disparity_px if (track_ok and player_pos is not None) else None,
-                category=category if (track_ok and player_pos is not None) else "unknown",
-                screen_x_px=player_pos["screen_x_px"] if player_pos is not None else None,
-                screen_y_px=player_pos["screen_y_px"] if player_pos is not None else None,
-                screen_x_norm=player_pos["screen_x_norm"] if player_pos is not None else None,
-                screen_y_norm=player_pos["screen_y_norm"] if player_pos is not None else None,
-                left_cx_px=player_pos["left_cx_px"] if player_pos is not None else None,
-                right_cx_px=player_pos["right_cx_px"] if player_pos is not None else None,
-                left_cy_px=player_pos["left_cy_px"] if player_pos is not None else None,
-                right_cy_px=player_pos["right_cy_px"] if player_pos is not None else None,
-                right_dx_px=player_pos["right_dx_px"] if player_pos is not None else None,
-                right_dy_px=player_pos["right_dy_px"] if player_pos is not None else None,
-                right_dx_norm=player_pos["right_dx_norm"] if player_pos is not None else None,
-                right_dy_norm=player_pos["right_dy_norm"] if player_pos is not None else None,
+                frame_width=frame_w,
+                frame_height=frame_h,
+                distance_m=None,
+                distance_raw_m=None,
+                disparity_px=None,
+                category="unknown",
+                screen_x_px=main_pos["screen_x_px"] if main_pos is not None else None,
+                screen_y_px=main_pos["screen_y_px"] if main_pos is not None else None,
+                screen_x_norm=main_pos["screen_x_norm"] if main_pos is not None else None,
+                screen_y_norm=main_pos["screen_y_norm"] if main_pos is not None else None,
+                right_cx_px=main_pos["right_cx_px"] if main_pos is not None else None,
+                right_cy_px=main_pos["right_cy_px"] if main_pos is not None else None,
+                right_dx_px=main_pos["right_dx_px"] if main_pos is not None else None,
+                right_dy_px=main_pos["right_dy_px"] if main_pos is not None else None,
+                right_dx_norm=main_pos["right_dx_norm"] if main_pos is not None else None,
+                right_dy_norm=main_pos["right_dy_norm"] if main_pos is not None else None,
+                aim_source=aim_source,
+                body_available=bool(body_pos is not None),
+                body_x_px=body_pos["screen_x_px"] if body_pos is not None else None,
+                body_y_px=body_pos["screen_y_px"] if body_pos is not None else None,
+                body_x_norm=body_pos["screen_x_norm"] if body_pos is not None else None,
+                body_y_norm=body_pos["screen_y_norm"] if body_pos is not None else None,
+                face_available=face_available,
+                face_x_px=face_pos["screen_x_px"] if face_pos is not None else None,
+                face_y_px=face_pos["screen_y_px"] if face_pos is not None else None,
+                face_x_norm=face_pos["screen_x_norm"] if face_pos is not None else None,
+                face_y_norm=face_pos["screen_y_norm"] if face_pos is not None else None,
+                face_conf=face_conf,
+                face_source=face_source,
+                box_w_norm=box_w_norm,
+                box_h_norm=box_h_norm,
+                box_area_norm=box_area_norm,
             )
-
-            with StepTimer("hstack", args.slow_ms):
-                combined = np.hstack([vis_left, vis_right])
 
             now = time.time()
             fps = 1.0 / max(now - prev_time, 1e-6)
             prev_time = now
 
             with StepTimer("draw_overlay", args.slow_ms):
-                cv2.putText(combined, f"FPS: {fps:.1f}", (20, 40),
+                cv2.putText(vis, f"FPS: {fps:.1f}", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(combined, f"L persons: {len(left_boxes)} / R persons: {len(right_boxes)}", (20, 75),
+                cv2.putText(vis, f"Persons: {len(boxes)}", (20, 75),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(combined, f"CaptureMode: {capture_mode}", (20, 110),
+                cv2.putText(vis, f"PosePeople: {len(pose_people)}", (20, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(vis, f"CaptureMode: {capture_mode}", (20, 145),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(combined, f"Window: {last_window_name[:70]}", (20, 140),
+                cv2.putText(vis, f"Window: {last_window_name[:70]}", (20, 175),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(combined, f"Capture: {monitor['left']},{monitor['top']} {monitor['width']}x{monitor['height']}", (20, 170),
+                cv2.putText(vis, f"Capture: {monitor['left']},{monitor['top']} {monitor['width']}x{monitor['height']}", (20, 205),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
                 if cached_hwnd is not None:
-                    cv2.putText(combined, f"HWND: {cached_hwnd}", (20, 200),
+                    cv2.putText(vis, f"HWND: {cached_hwnd}", (20, 235),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
-                cv2.putText(combined, f"FrameDiff: {frame_diff_mean:.3f}", (20, 230),
+                cv2.putText(vis, f"FrameDiff: {frame_diff_mean:.3f}", (20, 265),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
                 pw_text = f"PrintWindow: {printwindow_state}"
-                cv2.putText(combined, pw_text, (20, 260),
+                cv2.putText(vis, pw_text, (20, 295),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
-                y_base = 290
-
-                if track_ok and track.left_box is not None and track.right_box is not None:
-                    dist_text = "N/A"
-                    if raw_distance_m is not None and ema_distance is not None:
-                        dist_text = f"raw={raw_distance_m:.2f}m smooth={ema_distance:.2f}m"
-                    elif raw_distance_m is not None:
-                        dist_text = f"raw={raw_distance_m:.2f}m"
-                    elif track.last_distance_m is not None:
-                        dist_text = f"hold={track.last_distance_m:.2f}m"
-
-                    disp_text = "N/A"
-                    if disparity_px is not None:
-                        disp_text = f"{disparity_px:.2f}px"
-                    elif track.last_disparity_px is not None:
-                        disp_text = f"{track.last_disparity_px:.2f}px"
-
-                    cv2.putText(
-                        combined,
-                        f"disp={disp_text}  {dist_text}  cat={category}",
-                        (20, y_base),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.75,
-                        (0, 255, 255),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                else:
-                    cv2.putText(
-                        combined,
-                        "No stereo pair / track lost",
-                        (20, y_base),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 100, 255),
-                        2,
-                        cv2.LINE_AA,
-                    )
+                y_base = 330
 
                 cv2.putText(
-                    combined,
+                    vis,
+                    "Distance: N/A (single-eye mode)",
+                    (20, y_base),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.75,
+                    (0, 180, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                cv2.putText(
+                    vis,
                     f"TrackMode: {track_mode} miss={track.miss_count}",
                     (20, y_base + 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -1608,61 +1822,117 @@ def main() -> int:
                     cv2.LINE_AA,
                 )
 
-                if player_pos is not None:
+                cv2.putText(
+                    vis,
+                    f"AimSource: {aim_source}",
+                    (20, y_base + 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 220, 255) if aim_source == "face" else (255, 220, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                if body_pos is not None:
                     cv2.putText(
-                        combined,
-                        f"PlayerXY: ({player_pos['screen_x_px']:.1f}, {player_pos['screen_y_px']:.1f}) px",
-                        (20, y_base + 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        combined,
-                        f"PlayerNorm: ({player_pos['screen_x_norm']:+.3f}, {player_pos['screen_y_norm']:+.3f})",
+                        vis,
+                        f"BodyXY: ({body_pos['screen_x_px']:.1f}, {body_pos['screen_y_px']:.1f}) px",
                         (20, y_base + 90),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (255, 255, 0),
+                        (100, 255, 255),
                         2,
                         cv2.LINE_AA,
                     )
                     cv2.putText(
-                        combined,
-                        f"RightOffsetPx: ({player_pos['right_dx_px']:+.1f}, {player_pos['right_dy_px']:+.1f})",
+                        vis,
+                        f"BodyNorm: ({body_pos['screen_x_norm']:+.3f}, {body_pos['screen_y_norm']:+.3f})",
                         (20, y_base + 120),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (255, 180, 0),
+                        (100, 255, 255),
                         2,
                         cv2.LINE_AA,
                     )
                     cv2.putText(
-                        combined,
-                        f"RightOffsetNorm: ({player_pos['right_dx_norm']:+.3f}, {player_pos['right_dy_norm']:+.3f})",
+                        vis,
+                        f"BoxNorm: w={box_w_norm:.3f} h={box_h_norm:.3f} area={box_area_norm:.4f}",
                         (20, y_base + 150),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (255, 180, 0),
+                        (100, 255, 180),
                         2,
                         cv2.LINE_AA,
                     )
                 else:
                     cv2.putText(
-                        combined,
-                        "PlayerXY: N/A",
-                        (20, y_base + 60),
+                        vis,
+                        "BodyXY: N/A",
+                        (20, y_base + 90),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
-                        (255, 255, 0),
+                        (100, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                if face_pos is not None:
+                    cv2.putText(
+                        vis,
+                        f"FaceXY: ({face_pos['screen_x_px']:.1f}, {face_pos['screen_y_px']:.1f}) px",
+                        (20, y_base + 180),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 80, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        vis,
+                        f"FaceNorm: ({face_pos['screen_x_norm']:+.3f}, {face_pos['screen_y_norm']:+.3f})",
+                        (20, y_base + 210),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 80, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        vis,
+                        f"FaceMeta: conf={face_conf:.2f} src={face_source}",
+                        (20, y_base + 240),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 80, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                else:
+                    cv2.putText(
+                        vis,
+                        "FaceXY: N/A",
+                        (20, y_base + 180),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 80, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                if main_pos is not None:
+                    cv2.putText(
+                        vis,
+                        f"MainOffsetNorm: ({main_pos['right_dx_norm']:+.3f}, {main_pos['right_dy_norm']:+.3f})",
+                        (20, y_base + 270),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 180, 0),
                         2,
                         cv2.LINE_AA,
                     )
 
             with StepTimer("imshow", args.slow_ms):
-                cv2.imshow(args.title, combined)
+                cv2.imshow(args.title, vis)
 
             with StepTimer("waitKey", args.slow_ms):
                 key = cv2.waitKey(1) & 0xFF

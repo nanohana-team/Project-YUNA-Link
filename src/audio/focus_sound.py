@@ -38,15 +38,15 @@ class SoundFocusConfig:
     channels: int = 2
     frames_per_buffer: int = 1024
 
-    voice_rms_threshold: float = 0.006
-    hold_seconds: float = 0.35
+    voice_rms_threshold: float = 0.008
+    hold_seconds: float = 0.55
 
     min_total_energy: float = 1e-8
-    direction_deadzone: float = 0.06
-    direction_gamma: float = 0.85
+    direction_deadzone: float = 0.14
+    direction_gamma: float = 1.15
     max_yaw_deg: float = 180.0
 
-    ema_alpha: float = 0.28
+    ema_alpha: float = 0.18
 
 
 # ============================================================
@@ -279,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--voice-threshold", type=float, default=0.006)
     p.add_argument("--hold-seconds", type=float, default=0.35)
     p.add_argument("--deadzone", type=float, default=0.06)
-    p.add_argument("--max-yaw", type=float, default=360.0)
+    p.add_argument("--max-yaw", type=float, default=180.0)
     p.add_argument("--ema-alpha", type=float, default=0.28)
 
     p.add_argument("--list-devices", action="store_true")

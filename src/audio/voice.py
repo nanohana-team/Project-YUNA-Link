@@ -1,23 +1,6 @@
 # ============================================================
-# Project YUNA Link - Voice Engine (Kotoba-Whisper v2.1)
+# Project YUNA Link - Voice Engine (High Accuracy Tuning)
 # ============================================================
-# 役割:
-#   - Windows既定再生デバイスのループバック録音
-#   - BGM/SE をある程度落とす簡易 voice gate
-#   - kotoba-whisper-v2.1 によるリアルタイム STT
-#   - 幻覚文 / ループ文 / 短すぎる文の抑制
-#   - 疑似話者分離（簡易）
-#
-# 依存:
-#   pip install soundcard numpy torch torchaudio accelerate transformers
-#   optional:
-#     pip install silero-vad
-#
-# 備考:
-#   - kotoba-whisper-v2.1 は transformers pipeline + trust_remote_code=True を使用
-#   - punctuators はこの版では使わない（必要なら後処理で別途追加）
-# ============================================================
-
 from __future__ import annotations
 
 import os
@@ -26,6 +9,7 @@ import time
 import queue
 import threading
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional, List, Dict, Any
 
@@ -168,13 +152,13 @@ class VoiceGate:
     def __init__(
         self,
         sample_rate: int = 16000,
-        voice_band_low_hz: float = 120.0,
-        voice_band_high_hz: float = 4300.0,
-        voice_band_ratio_threshold: float = 0.70,
-        rms_threshold: float = 0.005,
-        zcr_min: float = 0.02,
-        zcr_max: float = 0.15,
-        use_silero_vad: bool = False,
+        voice_band_low_hz: float = 100.0,
+        voice_band_high_hz: float = 5200.0,
+        voice_band_ratio_threshold: float = 0.52,
+        rms_threshold: float = 0.0030,
+        zcr_min: float = 0.005,
+        zcr_max: float = 0.22,
+        use_silero_vad: bool = True,
     ) -> None:
         self.sample_rate = sample_rate
         self.voice_band_low_hz = voice_band_low_hz
@@ -234,19 +218,22 @@ class VoiceGate:
             audio.astype(np.float32),
             self.vad_model,
             sampling_rate=self.sample_rate,
-            threshold=0.5,
-            min_speech_duration_ms=120,
-            min_silence_duration_ms=100,
-            speech_pad_ms=30,
+            threshold=0.42,
+            min_speech_duration_ms=80,
+            min_silence_duration_ms=120,
+            speech_pad_ms=60,
             return_seconds=False,
         )
         return len(timestamps) > 0
 
     def inspect(self, audio: np.ndarray) -> VoiceChunkInfo:
-        rms = self.rms(audio)
-        peak = self.peak(audio)
-        ratio = self.voice_band_ratio(audio)
-        zcr = self.zcr(audio)
+        # ゲート判定には軽く帯域を見てもよいが、ASR入力は元音声を使う
+        gate_audio = self.bandpass_voice(audio)
+
+        rms = self.rms(gate_audio)
+        peak = self.peak(gate_audio)
+        ratio = self.voice_band_ratio(gate_audio)
+        zcr = self.zcr(gate_audio)
 
         if rms < self.rms_threshold:
             return VoiceChunkInfo(rms, ratio, zcr, peak, False, "low_rms")
@@ -365,10 +352,13 @@ class RealtimeVoiceEngine:
         device: str = "cuda",
         sample_rate: int = 16000,
         block_duration: float = 0.08,
-        silence_duration: float = 0.45,
-        partial_window_sec: float = 1.8,
-        min_utterance_sec: float = 0.8,
-        use_silero_vad: bool = False,
+        silence_duration: float = 0.70,
+        partial_window_sec: float = 2.6,
+        min_utterance_sec: float = 0.45,
+        use_silero_vad: bool = True,
+        enable_partial: bool = True,
+        partial_min_interval: float = 0.70,
+        preroll_sec: float = 0.32,
         debug: bool = True,
     ) -> None:
         if pipeline is None:
@@ -381,6 +371,8 @@ class RealtimeVoiceEngine:
         self.silence_duration = silence_duration
         self.partial_window_sec = partial_window_sec
         self.min_utterance_sec = min_utterance_sec
+        self.enable_partial = enable_partial
+        self.partial_min_interval = partial_min_interval
         self.debug = debug
 
         self.device = "cuda:0" if device == "cuda" and torch.cuda.is_available() else "cpu"
@@ -398,7 +390,14 @@ class RealtimeVoiceEngine:
             batch_size=1,
         )
 
-        self.generate_kwargs = {
+        # 高精度寄り。未対応モデルでも落ちにくいよう fallback する
+        self.generate_kwargs_primary = {
+            "language": "ja",
+            "task": "transcribe",
+            "temperature": 0.0,
+            "num_beams": 4,
+        }
+        self.generate_kwargs_fallback = {
             "language": "ja",
             "task": "transcribe",
         }
@@ -421,6 +420,10 @@ class RealtimeVoiceEngine:
         self.start_time: Optional[float] = None
         self.last_partial_text = ""
         self.last_debug_print = 0.0
+        self.last_partial_emit_time = 0.0
+
+        self.preroll_frames = max(1, int(preroll_sec / block_duration))
+        self.preroll_buffer: deque[np.ndarray] = deque(maxlen=self.preroll_frames)
 
         self.hallucination_patterns = [
             r"^ご視聴ありがとうございました[。！!]*$",
@@ -488,7 +491,7 @@ class RealtimeVoiceEngine:
             self.stop()
 
     # --------------------------------------------------------
-    # Internal
+    # Internal helpers
     # --------------------------------------------------------
 
     def _normalize_text(self, text: str) -> str:
@@ -538,13 +541,13 @@ class RealtimeVoiceEngine:
         if not norm:
             return False
 
-        if len(norm) <= 2:
+        if len(norm) <= 1:
             return False
 
-        if len(norm) > 80:
+        if len(norm) > 120:
             return False
 
-        if re.fullmatch(r"[ぁ-んァ-ヶー]{1,5}", norm):
+        if re.fullmatch(r"[ぁ-んァ-ヶー]{1,2}", norm):
             return False
 
         if self._is_loop_text(norm):
@@ -557,7 +560,7 @@ class RealtimeVoiceEngine:
         if not norm:
             return False
 
-        if len(norm) < 3:
+        if len(norm) < 2:
             return False
 
         if self._is_loop_text(norm):
@@ -565,21 +568,55 @@ class RealtimeVoiceEngine:
 
         return True
 
+    def _preprocess_for_asr(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return audio.astype(np.float32)
+
+        x = audio.astype(np.float32).copy()
+
+        # DC除去
+        x = x - np.mean(x)
+
+        # 軽いピーク抑制
+        peak = float(np.max(np.abs(x))) + 1e-8
+        if peak > 0.98:
+            x = x * (0.98 / peak)
+
+        # 軽い正規化（過剰に持ち上げない）
+        rms = float(np.sqrt(np.mean(np.square(x), dtype=np.float64))) + 1e-8
+        target_rms = 0.06
+        gain = min(3.0, max(0.8, target_rms / rms))
+        x = x * gain
+
+        # 念のためクリップ
+        x = np.clip(x, -1.0, 1.0)
+
+        return x.astype(np.float32)
+
     def _transcribe(self, audio: np.ndarray) -> str:
         if audio.size == 0:
             return ""
 
-        filtered = self.voice_gate.bandpass_voice(audio)
+        asr_audio = self._preprocess_for_asr(audio)
 
         try:
             result = self.asr_pipe(
-                {"array": filtered, "sampling_rate": self.sample_rate},
+                {"array": asr_audio, "sampling_rate": self.sample_rate},
                 return_timestamps=False,
-                generate_kwargs=self.generate_kwargs,
+                generate_kwargs=self.generate_kwargs_primary,
             )
-        except Exception as e:
-            print(f"[VOICE][WARN] transcription failed: {e}")
-            return ""
+        except Exception as e1:
+            try:
+                if self.debug:
+                    print(f"[VOICE][WARN] primary generate_kwargs failed: {e1}")
+                result = self.asr_pipe(
+                    {"array": asr_audio, "sampling_rate": self.sample_rate},
+                    return_timestamps=False,
+                    generate_kwargs=self.generate_kwargs_fallback,
+                )
+            except Exception as e2:
+                print(f"[VOICE][WARN] transcription failed: {e2}")
+                return ""
 
         if isinstance(result, dict):
             text = result.get("text", "")
@@ -604,6 +641,10 @@ class RealtimeVoiceEngine:
 
     def _process_chunk(self, audio: np.ndarray) -> None:
         now = time.time()
+
+        # 常にプリロール保持
+        self.preroll_buffer.append(audio)
+
         info = self.voice_gate.inspect(audio)
 
         if self.debug and now - self.last_debug_print >= 0.5:
@@ -620,8 +661,9 @@ class RealtimeVoiceEngine:
             if not self.speaking:
                 self.speaking = True
                 self.start_time = now
-                self.buffer = []
+                self.buffer = list(self.preroll_buffer)
                 self.last_partial_text = ""
+                self.last_partial_emit_time = 0.0
                 print("[VOICE] Speech start")
 
             self.buffer.append(audio)
@@ -630,11 +672,10 @@ class RealtimeVoiceEngine:
         else:
             if self.speaking:
                 self.buffer.append(audio)
-
                 if now - self.last_voice_time > self.silence_duration:
                     self._finalize_utterance(now)
 
-        if self.speaking and self.buffer:
+        if self.enable_partial and self.speaking and self.buffer:
             self._update_partial(now)
 
     def _finalize_utterance(self, now: float) -> None:
@@ -679,16 +720,20 @@ class RealtimeVoiceEngine:
         self.buffer = []
         self.start_time = None
         self.last_partial_text = ""
+        self.last_partial_emit_time = 0.0
         print("[VOICE] Speech end")
 
     def _update_partial(self, now: float) -> None:
+        if now - self.last_partial_emit_time < self.partial_min_interval:
+            return
+
         recent = np.concatenate(self.buffer).astype(np.float32)
         max_frames = int(self.sample_rate * self.partial_window_sec)
 
         if recent.size > max_frames:
             recent = recent[-max_frames:]
 
-        if recent.size < int(self.sample_rate * 1.8):
+        if recent.size < int(self.sample_rate * 2.0):
             return
 
         info = self.voice_gate.inspect(recent)
@@ -704,6 +749,7 @@ class RealtimeVoiceEngine:
             and self._is_valid_partial(text)
         ):
             self.last_partial_text = text
+            self.last_partial_emit_time = now
 
             speaker_id, speaker_changed, confidence = self.speaker_tracker.assign(
                 recent,
@@ -760,10 +806,13 @@ def main() -> None:
         device="cuda",
         sample_rate=16000,
         block_duration=0.08,
-        silence_duration=0.45,
-        partial_window_sec=1.8,
-        min_utterance_sec=0.8,
-        use_silero_vad=False,
+        silence_duration=0.70,
+        partial_window_sec=2.6,
+        min_utterance_sec=0.45,
+        use_silero_vad=True,
+        enable_partial=True,
+        partial_min_interval=0.70,
+        preroll_sec=0.32,
         debug=True,
     )
 
