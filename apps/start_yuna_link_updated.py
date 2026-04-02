@@ -227,7 +227,7 @@ def build_processes(args):
         if chat_script is not None:
             cmd = [
                 py, str(chat_script),
-                "--max-history-turns", "6",
+                "--max-history-turns", "8",
                 "--model", "OpenPipe/Qwen3-14B-Instruct",
             ]
             procs.append(ManagedProcess("CHAT", cmd, root, interactive=True))
